@@ -110,6 +110,9 @@ struct hot_info {
 	atomic_t run_debugfs;
 };
 
+/* set how often to update temperatures (seconds) */
+extern int sysctl_hot_update_interval;
+
 /*
  * Hot data tracking ioctls:
  *

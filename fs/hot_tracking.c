@@ -23,6 +23,9 @@
 
 static struct dentry *hot_debugfs_root;
 
+int sysctl_hot_update_interval __read_mostly = 300;
+EXPORT_SYMBOL_GPL(sysctl_hot_update_interval);
+
 /* kmem_cache pointers for slab caches */
 static struct kmem_cache *hot_inode_item_cachep __read_mostly;
 static struct kmem_cache *hot_range_item_cachep __read_mostly;
@@ -605,7 +608,7 @@ static void hot_update_worker(struct work_struct *work)
 
 	/* Instert next delayed work */
 	queue_delayed_work(root->update_wq, &root->update_work,
-		msecs_to_jiffies(HOT_UPDATE_INTERVAL * MSEC_PER_SEC));
+		msecs_to_jiffies(sysctl_hot_update_interval * MSEC_PER_SEC));
 }
 
 static void *hot_range_seq_start(struct seq_file *seq, loff_t *pos)
@@ -1184,7 +1187,7 @@ static struct hot_info *hot_tree_init(struct super_block *sb)
 	/* Initialize hot tracking wq and arm one delayed work */
 	INIT_DELAYED_WORK(&root->update_work, hot_update_worker);
 	queue_delayed_work(root->update_wq, &root->update_work,
-		msecs_to_jiffies(HOT_UPDATE_INTERVAL * MSEC_PER_SEC));
+		msecs_to_jiffies(sysctl_hot_update_interval * MSEC_PER_SEC));
 
 	/* Register a shrinker callback */
 	root->hot_shrink.shrink = hot_track_prune;
