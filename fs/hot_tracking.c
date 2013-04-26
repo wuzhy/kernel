@@ -26,6 +26,26 @@ static struct kmem_cache *hot_range_item_cachep __read_mostly;
 
 static void hot_inode_item_free(struct kref *kref);
 
+static void hot_comm_item_init(struct hot_comm_item *ci, int type)
+{
+	kref_init(&ci->refs);
+	clear_bit(HOT_DELETING, &ci->delete_flag);
+	memset(&ci->hot_freq_data, 0, sizeof(struct hot_freq_data));
+	ci->hot_freq_data.avg_delta_reads = (u64) -1;
+	ci->hot_freq_data.avg_delta_writes = (u64) -1;
+	ci->hot_freq_data.flags = type;
+}
+
+static void hot_range_item_init(struct hot_range_item *hr,
+			struct hot_inode_item *he, loff_t start)
+{
+	hr->start = start;
+	hr->len = hot_shift(1, RANGE_BITS, true);
+	hr->hot_inode = he;
+	hr->storage_type = -1;
+	hot_comm_item_init(&hr->hot_range, TYPE_RANGE);
+}
+
 static void hot_comm_item_free_cb(struct rcu_head *head)
 {
 	struct hot_comm_item *ci = container_of(head,
@@ -65,10 +85,27 @@ void hot_comm_item_put(struct hot_comm_item *ci)
 }
 EXPORT_SYMBOL_GPL(hot_comm_item_put);
 
+/*
+ * root->t_lock or he->i_lock is acquired in this function
+ */
 static void hot_comm_item_unlink(struct hot_info *root,
 				struct hot_comm_item *ci)
 {
 	if (!test_and_set_bit(HOT_DELETING, &ci->delete_flag)) {
+		if (ci->hot_freq_data.flags == TYPE_RANGE) {
+			struct hot_range_item *hr = container_of(ci,
+					struct hot_range_item, hot_range);
+			struct hot_inode_item *he = hr->hot_inode;
+
+			spin_lock(&he->i_lock);
+			rb_erase(&ci->rb_node, &he->hot_range_tree);
+			spin_unlock(&he->i_lock);
+		} else {
+			spin_lock(&root->t_lock);
+			rb_erase(&ci->rb_node, &root->hot_inode_tree);
+			spin_unlock(&root->t_lock);
+		}
+
 		hot_comm_item_put(ci);
 	}
 }
@@ -94,6 +131,15 @@ static void hot_range_tree_free(struct hot_inode_item *he)
 
 }
 
+static void hot_inode_item_init(struct hot_inode_item *he,
+			struct hot_info *hot_root, u64 ino)
+{
+	he->i_ino = ino;
+	he->hot_root = hot_root;
+	spin_lock_init(&he->i_lock);
+	hot_comm_item_init(&he->hot_inode, TYPE_INODE);
+}
+
 static void hot_inode_item_free(struct kref *kref)
 {
 	struct hot_comm_item *ci = container_of(kref,
@@ -105,6 +151,195 @@ static void hot_inode_item_free(struct kref *kref)
 	he->hot_root = NULL;
 
 	call_rcu(&he->hot_inode.c_rcu, hot_comm_item_free_cb);
+}
+
+/* root->t_lock is acquired in this function. */
+struct hot_inode_item
+*hot_inode_item_lookup(struct hot_info *root, u64 ino, int alloc)
+{
+	struct rb_node **p;
+	struct rb_node *parent = NULL;
+	struct hot_comm_item *ci;
+	struct hot_inode_item *he, *he_new = NULL;
+
+	/* walk tree to find insertion point */
+redo:
+	spin_lock(&root->t_lock);
+	p = &root->hot_inode_tree.rb_node;
+	while (*p) {
+		parent = *p;
+		ci = rb_entry(parent, struct hot_comm_item, rb_node);
+		he = container_of(ci, struct hot_inode_item, hot_inode);
+		if (ino < he->i_ino)
+			p = &(*p)->rb_left;
+		else if (ino > he->i_ino)
+			p = &(*p)->rb_right;
+		else {
+			hot_comm_item_get(&he->hot_inode);
+			spin_unlock(&root->t_lock);
+			if (he_new)
+				/*
+				 * Lost the race. Somebody else inserted
+				 * the item for the inode. Free the
+				 * newly allocated item.
+				 */
+				kmem_cache_free(hot_inode_item_cachep, he_new);
+
+			if (test_bit(HOT_DELETING, &he->hot_inode.delete_flag))
+				return ERR_PTR(-ENOENT);
+
+			return he;
+		}
+	}
+
+	if (he_new) {
+		rb_link_node(&he_new->hot_inode.rb_node, parent, p);
+		rb_insert_color(&he_new->hot_inode.rb_node,
+				&root->hot_inode_tree);
+		hot_comm_item_get(&he_new->hot_inode);
+		spin_unlock(&root->t_lock);
+		return he_new;
+	}
+	spin_unlock(&root->t_lock);
+
+	if (!alloc)
+		return ERR_PTR(-ENOENT);
+
+	he_new = kmem_cache_zalloc(hot_inode_item_cachep, GFP_NOFS);
+	if (!he_new)
+		return ERR_PTR(-ENOMEM);
+
+	hot_inode_item_init(he_new, root, ino);
+
+	goto redo;
+}
+EXPORT_SYMBOL_GPL(hot_inode_item_lookup);
+
+void hot_inode_item_delete(struct inode *inode)
+{
+	struct hot_info *root = inode->i_sb->s_hot_root;
+	struct hot_inode_item *he;
+
+	if (!root || !S_ISREG(inode->i_mode))
+		return;
+
+	he = hot_inode_item_lookup(root, inode->i_ino, 0);
+	if (IS_ERR(he))
+		return;
+
+	hot_comm_item_put(&he->hot_inode); /* for lookup */
+	hot_comm_item_unlink(root, &he->hot_inode);
+}
+EXPORT_SYMBOL_GPL(hot_inode_item_delete);
+
+/* he->i_lock is acquired in this function. */
+struct hot_range_item
+*hot_range_item_lookup(struct hot_inode_item *he, loff_t start, int alloc)
+{
+	struct rb_node **p;
+	struct rb_node *parent = NULL;
+	struct hot_comm_item *ci;
+	struct hot_range_item *hr, *hr_new = NULL;
+
+	start = hot_shift(start, RANGE_BITS, true);
+
+	/* walk tree to find insertion point */
+redo:
+	spin_lock(&he->i_lock);
+	p = &he->hot_range_tree.rb_node;
+	while (*p) {
+		parent = *p;
+		ci = rb_entry(parent, struct hot_comm_item, rb_node);
+		hr = container_of(ci, struct hot_range_item, hot_range);
+		if (start < hr->start)
+			p = &(*p)->rb_left;
+		else if (start > (hr->start + hr->len - 1))
+			p = &(*p)->rb_right;
+		else {
+			hot_comm_item_get(&hr->hot_range);
+			spin_unlock(&he->i_lock);
+			if(hr_new)
+				/*
+				 * Lost the race. Somebody else inserted
+				 * the item for the range. Free the
+				 * newly allocated item.
+				 */
+				kmem_cache_free(hot_range_item_cachep, hr_new);
+
+			if (test_bit(HOT_DELETING, &hr->hot_range.delete_flag))
+				return ERR_PTR(-ENOENT);
+
+			return hr;
+		}
+	}
+
+	if (hr_new) {
+		rb_link_node(&hr_new->hot_range.rb_node, parent, p);
+		rb_insert_color(&hr_new->hot_range.rb_node,
+				&he->hot_range_tree);
+		hot_comm_item_get(&hr_new->hot_range);
+		spin_unlock(&he->i_lock);
+		return hr_new;
+	}
+	spin_unlock(&he->i_lock);
+
+	if (!alloc)
+		return ERR_PTR(-ENOENT);
+
+	hr_new = kmem_cache_zalloc(hot_range_item_cachep, GFP_NOFS);
+	if (!hr_new)
+		return ERR_PTR(-ENOMEM);
+
+	hot_range_item_init(hr_new, he, start);
+
+	goto redo;
+}
+EXPORT_SYMBOL_GPL(hot_range_item_lookup);
+
+/*
+ * This function does the actual work of updating
+ * the frequency numbers.
+ *
+ * avg_delta_{reads,writes} are indeed a kind of simple moving
+ * average of the time difference between each of the last
+ * 2^(FREQ_POWER) reads/writes. If there have not yet been that
+ * many reads or writes, it's likely that the values will be very
+ * large; They are initialized to the largest possible value for the
+ * data type. Simply, we don't want a few fast access to a file to
+ * automatically make it appear very hot.
+ */
+static void hot_freq_calc(struct timespec old_atime,
+		struct timespec cur_time, u64 *avg)
+{
+	struct timespec delta_ts;
+	u64 new_delta;
+
+	delta_ts = timespec_sub(cur_time, old_atime);
+	new_delta = timespec_to_ns(&delta_ts) >> FREQ_POWER;
+
+	*avg = (*avg << FREQ_POWER) - *avg + new_delta;
+	*avg = *avg >> FREQ_POWER;
+}
+
+static void hot_freq_update(struct hot_info *root,
+		struct hot_comm_item *ci, bool write)
+{
+	struct timespec cur_time = current_kernel_time();
+	struct hot_freq_data *freq_data = &ci->hot_freq_data;
+
+	if (write) {
+		freq_data->nr_writes += 1;
+		hot_freq_calc(freq_data->last_write_time,
+				cur_time,
+				&freq_data->avg_delta_writes);
+		freq_data->last_write_time = cur_time;
+	} else {
+		freq_data->nr_reads += 1;
+		hot_freq_calc(freq_data->last_read_time,
+				cur_time,
+				&freq_data->avg_delta_reads);
+		freq_data->last_read_time = cur_time;
+	}
 }
 
 /*
@@ -127,6 +362,55 @@ void __init hot_cache_init(void)
 		kmem_cache_destroy(hot_inode_item_cachep);
 }
 EXPORT_SYMBOL_GPL(hot_cache_init);
+
+/*
+ * Main function to update i/o access frequencies, and it will be called
+ * from read/writepages() hooks, which are read_pages(), do_writepages(),
+ * do_generic_file_read(), and __blockdev_direct_IO().
+ */
+void hot_update_freqs(struct inode *inode, loff_t start,
+			size_t len, int rw)
+{
+	struct hot_info *root = inode->i_sb->s_hot_root;
+	struct hot_inode_item *he;
+	struct hot_range_item *hr;
+	u64 range_size;
+	loff_t cur, end;
+
+	if (!root || (len == 0) || !S_ISREG(inode->i_mode))
+		return;
+
+	he = hot_inode_item_lookup(root, inode->i_ino, 1);
+	if (IS_ERR(he))
+		return;
+
+	hot_freq_update(root, &he->hot_inode, rw);
+
+	/*
+	 * Align ranges on range size boundary
+	 * to prevent proliferation of range structs
+	 */
+	range_size  = hot_shift(1, RANGE_BITS, true);
+	end = hot_shift((start + len + range_size - 1),
+			RANGE_BITS, false);
+	cur = hot_shift(start, RANGE_BITS, false);
+	for (; cur < end; cur++) {
+		hr = hot_range_item_lookup(he, cur, 1);
+		if (IS_ERR(hr)) {
+			WARN(1, "hot_range_item_lookup returns %ld\n",
+				PTR_ERR(hr));
+			hot_comm_item_put(&he->hot_inode);
+			return;
+		}
+
+		hot_freq_update(root, &hr->hot_range, rw);
+
+		hot_comm_item_put(&hr->hot_range);
+	}
+
+	hot_comm_item_put(&he->hot_inode);
+}
+EXPORT_SYMBOL_GPL(hot_update_freqs);
 
 static struct hot_info *hot_tree_init(struct super_block *sb)
 {

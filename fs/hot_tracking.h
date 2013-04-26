@@ -14,4 +14,8 @@
 
 #include <linux/hot_tracking.h>
 
+/* size of sub-file ranges */
+#define RANGE_BITS 20
+#define FREQ_POWER 4
+
 #endif /* __HOT_TRACKING__ */

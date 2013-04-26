@@ -67,6 +67,8 @@ struct hot_inode_item {
 	struct hot_comm_item hot_inode; /* node in hot_inode_tree */
 	struct rb_root hot_range_tree;	/* tree of ranges */
 	spinlock_t i_lock;		/* protect above tree */
+	struct hot_info *hot_root;	/* associated hot_info */
+	u64 i_ino;			/* inode number from inode */
 };
 
 /*
@@ -76,6 +78,9 @@ struct hot_inode_item {
 struct hot_range_item {
 	struct hot_comm_item hot_range;
 	struct hot_inode_item *hot_inode;	/* associated hot_inode_item */
+	loff_t start;				/* offset in bytes */
+	size_t len;				/* length in bytes */
+	int storage_type;			/* type of storage */
 };
 
 struct hot_info {
@@ -89,6 +94,13 @@ extern void __init hot_cache_init(void);
 extern int hot_track_init(struct super_block *sb);
 extern void hot_track_exit(struct super_block *sb);
 extern void hot_comm_item_put(struct hot_comm_item *ci);
+extern void hot_update_freqs(struct inode *inode, loff_t start,
+				size_t len, int rw);
+extern struct hot_inode_item *hot_inode_item_lookup(struct hot_info *root,
+						u64 ino, int alloc);
+extern struct hot_range_item *hot_range_item_lookup(struct hot_inode_item *he,
+						loff_t start, int alloc);
+extern void hot_inode_item_delete(struct inode *inode);
 
 static inline u64 hot_shift(u64 counter, u32 bits, bool dir)
 {
@@ -96,6 +108,11 @@ static inline u64 hot_shift(u64 counter, u32 bits, bool dir)
 		return counter << bits;
 	else
 		return counter >> bits;
+}
+
+static inline void hot_comm_item_get(struct hot_comm_item *ci)
+{
+	kref_get(&ci->refs);
 }
 
 #endif /* __KERNEL__ */
