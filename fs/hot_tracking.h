@@ -43,4 +43,9 @@
 #define AVW_DIVIDER_POWER 40 /* AVW - average delta between recent writes(ns) */
 #define AVW_COEFF_POWER 0
 
+struct hot_debugfs {
+	const char *name;
+	const struct file_operations *fops;
+};
+
 #endif /* __HOT_TRACKING__ */

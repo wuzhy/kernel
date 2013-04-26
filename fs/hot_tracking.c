@@ -17,8 +17,11 @@
 #include <linux/fs.h>
 #include <linux/types.h>
 #include <linux/list_sort.h>
+#include <linux/debugfs.h>
 #include <linux/limits.h>
 #include "hot_tracking.h"
+
+static struct dentry *hot_debugfs_root;
 
 /* kmem_cache pointers for slab caches */
 static struct kmem_cache *hot_inode_item_cachep __read_mostly;
@@ -461,6 +464,10 @@ static bool hot_map_update(struct hot_info *root,
 		u32 type = ci->hot_freq_data.flags;
 		spin_lock(&root->m_lock);
 		if (test_and_clear_bit(HOT_IN_LIST, &ci->delete_flag)) {
+			if (atomic_read(&root->run_debugfs)) {
+				spin_unlock(&root->m_lock);
+				return true;
+			}
 			list_del_rcu(&ci->track_list);
 			flag = true;
 		}
@@ -601,6 +608,449 @@ static void hot_update_worker(struct work_struct *work)
 		msecs_to_jiffies(HOT_UPDATE_INTERVAL * MSEC_PER_SEC));
 }
 
+static void *hot_range_seq_start(struct seq_file *seq, loff_t *pos)
+	__acquires(rcu)
+{
+	struct hot_info *root = seq->private;
+	struct rb_node *node_he, *node_hr;
+	struct hot_comm_item *ci_he, *ci_hr;
+	struct hot_inode_item *he;
+	struct hot_range_item *hr;
+	loff_t l = *pos;
+
+	rcu_read_lock();
+	node_he = rb_first(&root->hot_inode_tree);
+	while (node_he) {
+		ci_he = rb_entry(node_he, struct hot_comm_item, rb_node);
+		he = container_of(ci_he, struct hot_inode_item, hot_inode);
+		node_hr = rb_first(&he->hot_range_tree);
+		while (node_hr) {
+			if (!l--) {
+				ci_hr = rb_entry(node_hr,
+					struct hot_comm_item, rb_node);
+				hr = container_of(ci_hr,
+					struct hot_range_item, hot_range);
+				return hr;
+			}
+			node_hr = rb_next(node_hr);
+		}
+		node_he = rb_next(node_he);
+	}
+
+	return NULL;
+}
+
+static void *hot_range_seq_next(struct seq_file *seq,
+				void *v, loff_t *pos)
+{
+	struct rb_node *node_he, *node_hr;
+	struct hot_comm_item *ci_he, *ci_hr;
+	struct hot_range_item *hr_next = NULL, *hr = v;
+	struct hot_inode_item *he_next;
+
+	(*pos)++;
+	node_hr = rb_next(&hr->hot_range.rb_node);
+	if (node_hr) {
+		ci_hr = rb_entry(node_hr, struct hot_comm_item, rb_node);
+		hr_next = container_of(ci_hr, struct hot_range_item, hot_range);
+
+		return hr_next;
+	}
+
+	node_he = rb_next(&hr->hot_inode->hot_inode.rb_node);
+loop_he:
+	if (node_he) {
+		ci_he = rb_entry(node_he, struct hot_comm_item, rb_node);
+		he_next = container_of(ci_he, struct hot_inode_item, hot_inode);
+		node_hr = rb_first(&he_next->hot_range_tree);
+		if (node_hr) {
+			ci_hr = rb_entry(node_hr,
+					struct hot_comm_item, rb_node);
+			hr_next = container_of(ci_hr,
+					struct hot_range_item, hot_range);
+		} else {
+			node_he = rb_next(node_he);
+			goto loop_he;
+		}
+	}
+
+	return hr_next;
+}
+
+static void hot_seq_stop(struct seq_file *seq, void *v)
+	__releases(rcu)
+{
+	rcu_read_unlock();
+}
+
+static int hot_range_seq_show(struct seq_file *seq, void *v)
+{
+	struct hot_range_item *hr = v;
+	struct hot_inode_item *he = hr->hot_inode;
+	struct hot_freq_data *freq_data;
+
+	freq_data = &hr->hot_range.hot_freq_data;
+	seq_printf(seq, "inode %llu, extent %llu+%llu, " \
+			"reads %u, writes %u, temp %u, " \
+			"storage %s\n",
+			he->i_ino, (unsigned long long)hr->start,
+			(unsigned long long)hr->len,
+			freq_data->nr_reads,
+			freq_data->nr_writes,
+			(u8)hot_shift((u64)freq_data->last_temp,
+					(32 - MAP_BITS), false),
+			(hr->storage_type == 1) ? "nonrot" : "rot");
+
+	return 0;
+}
+
+static void *hot_inode_seq_start(struct seq_file *seq, loff_t *pos)
+	__acquires(rcu)
+{
+	struct hot_info *root = seq->private;
+	struct rb_node *node;
+	struct hot_comm_item *ci;
+	struct hot_inode_item *he = NULL;
+	loff_t l = *pos;
+
+	rcu_read_lock();
+	node = rb_first(&root->hot_inode_tree);
+	while (node) {
+		if (!l--) {
+			ci = rb_entry(node, struct hot_comm_item, rb_node);
+			he = container_of(ci, struct hot_inode_item, hot_inode);
+			break;
+		}
+		node = rb_next(node);
+	}
+
+	return he;
+}
+
+static void *hot_inode_seq_next(struct seq_file *seq, void *v, loff_t *pos)
+{
+	struct hot_inode_item *he_next = NULL, *he = v;
+	struct rb_node *node;
+	struct hot_comm_item *ci;
+
+	(*pos)++;
+	node = rb_next(&he->hot_inode.rb_node);
+	if (node) {
+		ci = rb_entry(node, struct hot_comm_item, rb_node);
+		he_next = container_of(ci, struct hot_inode_item, hot_inode);
+	}
+
+	return he_next;
+}
+
+static int hot_inode_seq_show(struct seq_file *seq, void *v)
+{
+	struct hot_inode_item *he = v;
+	struct hot_freq_data *freq_data = &he->hot_inode.hot_freq_data;
+
+	seq_printf(seq, "inode %llu, reads %u, writes %u, temp %d\n",
+		he->i_ino,
+		freq_data->nr_reads,
+		freq_data->nr_writes,
+		(u8)hot_shift((u64)freq_data->last_temp,
+				(32 - MAP_BITS), false));
+
+	return 0;
+}
+
+static struct hot_comm_item *hot_spot_seq_start(struct hot_info *root,
+					loff_t *pos, int type)
+	__acquires(rcu)
+{
+	struct hot_comm_item *ci;
+	struct list_head *track_list;
+	int i;
+
+	atomic_inc(&root->run_debugfs);
+
+	rcu_read_lock();
+	for (i = MAP_SIZE - 1; i >= 0; i--) {
+		track_list = seq_list_start_rcu(&root->hot_map[type][i], *pos);
+		if (track_list) {
+			ci = container_of(track_list,
+				struct hot_comm_item, track_list);
+			return ci;
+		}
+	}
+
+	return NULL;
+}
+
+static struct hot_comm_item *hot_spot_seq_next(struct hot_info *root,
+					struct hot_comm_item *ci,
+					loff_t *pos, int type)
+{
+	struct hot_comm_item *ci_next = NULL;
+	struct list_head *track_list;
+	int i;
+
+	i = (int)hot_shift(ci->hot_freq_data.last_temp,
+			(32 - MAP_BITS), false);
+
+	track_list = seq_list_next_rcu(&ci->track_list,
+				&root->hot_map[type][i], pos);
+next:
+	if (track_list)
+		ci_next = container_of(track_list,
+				struct hot_comm_item, track_list);
+	else if (--i >= 0) {
+		track_list = seq_list_next_rcu(&root->hot_map[type][i],
+					&root->hot_map[type][i], pos);
+		goto next;
+	}
+
+	return ci_next;
+}
+
+static void hot_spot_seq_stop(struct seq_file *seq, void *v)
+	__releases(rcu)
+{
+	struct hot_info *root = seq->private;
+
+	atomic_dec(&root->run_debugfs);
+	rcu_read_unlock();
+}
+
+static void *hot_spot_range_seq_start(struct seq_file *seq, loff_t *pos)
+{
+	struct hot_info *root = seq->private;
+	struct hot_range_item *hr = NULL;
+	struct hot_comm_item *ci;
+
+	ci =  hot_spot_seq_start(root, pos, TYPE_RANGE);
+	if (ci)
+		hr = container_of(ci, struct hot_range_item, hot_range);
+
+	return hr;
+}
+
+static void *hot_spot_range_seq_next(struct seq_file *seq, void *v, loff_t *pos)
+{
+	struct hot_info *root = seq->private;
+	struct hot_range_item *hr_next = NULL, *hr = v;
+	struct hot_comm_item *ci_next;
+
+	ci_next = hot_spot_seq_next(root, &hr->hot_range, pos, TYPE_RANGE);
+	if (ci_next)
+		hr_next = container_of(ci_next,
+				struct hot_range_item, hot_range);
+
+	return hr_next;
+}
+
+static void *hot_spot_inode_seq_start(struct seq_file *seq, loff_t *pos)
+{
+	struct hot_info *root = seq->private;
+	struct hot_inode_item *he = NULL;
+	struct hot_comm_item *ci;
+
+	ci = hot_spot_seq_start(root, pos, TYPE_INODE);
+	if (ci)
+		he = container_of(ci, struct hot_inode_item, hot_inode);
+
+	return he;
+}
+
+static void *hot_spot_inode_seq_next(struct seq_file *seq, void *v, loff_t *pos)
+{
+	struct hot_info *root = seq->private;
+	struct hot_inode_item *he_next = NULL, *he = v;
+	struct hot_comm_item *ci_next;
+
+	ci_next = hot_spot_seq_next(root, &he->hot_inode, pos, TYPE_INODE);
+	if (ci_next)
+		he_next = container_of(ci_next,
+				struct hot_inode_item, hot_inode);
+
+	return he_next;
+}
+
+static const struct seq_operations hot_range_seq_ops = {
+	.start = hot_range_seq_start,
+	.next = hot_range_seq_next,
+	.stop = hot_seq_stop,
+	.show = hot_range_seq_show
+};
+
+static const struct seq_operations hot_inode_seq_ops = {
+	.start = hot_inode_seq_start,
+	.next = hot_inode_seq_next,
+	.stop = hot_seq_stop,
+	.show = hot_inode_seq_show
+};
+
+static const struct seq_operations hot_spot_range_seq_ops = {
+	.start = hot_spot_range_seq_start,
+	.next = hot_spot_range_seq_next,
+	.stop = hot_spot_seq_stop,
+	.show = hot_range_seq_show
+};
+
+static const struct seq_operations hot_spot_inode_seq_ops = {
+	.start = hot_spot_inode_seq_start,
+	.next = hot_spot_inode_seq_next,
+	.stop = hot_spot_seq_stop,
+	.show = hot_inode_seq_show
+};
+
+static int hot_range_seq_open(struct inode *inode, struct file *file)
+{
+	int ret = seq_open_private(file, &hot_range_seq_ops, 0);
+	if (ret == 0) {
+		struct seq_file *seq = file->private_data;
+		seq->private = inode->i_private;
+	}
+	return ret;
+}
+
+static int hot_inode_seq_open(struct inode *inode, struct file *file)
+{
+	int ret = seq_open_private(file, &hot_inode_seq_ops, 0);
+	if (ret == 0) {
+		struct seq_file *seq = file->private_data;
+		seq->private = inode->i_private;
+	}
+	return ret;
+}
+
+static int hot_spot_range_seq_open(struct inode *inode, struct file *file)
+{
+	int ret = seq_open_private(file, &hot_spot_range_seq_ops, 0);
+	if (ret == 0) {
+		struct seq_file *seq = file->private_data;
+		seq->private = inode->i_private;
+	}
+	return ret;
+}
+
+static int hot_spot_inode_seq_open(struct inode *inode, struct file *file)
+{
+	int ret = seq_open_private(file, &hot_spot_inode_seq_ops, 0);
+	if (ret == 0) {
+		struct seq_file *seq = file->private_data;
+		seq->private = inode->i_private;
+	}
+	return ret;
+}
+
+/* fops to override for printing range data */
+static const struct file_operations hot_debugfs_range_fops = {
+	.open = hot_range_seq_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = seq_release,
+};
+
+/* fops to override for printing inode data */
+static const struct file_operations hot_debugfs_inode_fops = {
+	.open = hot_inode_seq_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = seq_release,
+};
+
+/* fops to override for printing temperature data */
+static const struct file_operations hot_debugfs_spot_range_fops = {
+	.open = hot_spot_range_seq_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = seq_release,
+};
+
+static const struct file_operations hot_debugfs_spot_inode_fops = {
+	.open = hot_spot_inode_seq_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = seq_release,
+};
+
+static const struct hot_debugfs hot_debugfs[] = {
+	{
+		.name = "extent_stat",
+		.fops  = &hot_debugfs_range_fops,
+	},
+	{
+		.name = "inode_stat",
+		.fops  = &hot_debugfs_inode_fops,
+	},
+	{
+		.name = "extent_spot",
+		.fops  = &hot_debugfs_spot_range_fops,
+	},
+	{
+		.name = "inode_spot",
+		.fops  = &hot_debugfs_spot_inode_fops,
+	},
+};
+
+/* initialize debugfs */
+static int hot_debugfs_init(struct super_block *sb)
+{
+	static const char hot_name[] = "hot_track";
+	struct dentry *dentry;
+	int i, ret = 0;
+
+	/* Determine if hot debufs root has existed */
+	if (!hot_debugfs_root) {
+		hot_debugfs_root = debugfs_create_dir(hot_name, NULL);
+		if (IS_ERR(hot_debugfs_root)) {
+			ret = PTR_ERR(hot_debugfs_root);
+			return ret;
+		}
+	}
+
+	/* create debugfs folder for this volume by mounted dev name */
+	sb->s_hot_root->debugfs_dentry =
+			debugfs_create_dir(sb->s_id, hot_debugfs_root);
+	if (IS_ERR(sb->s_hot_root->debugfs_dentry)) {
+		ret = PTR_ERR(sb->s_hot_root->debugfs_dentry);
+		goto root_err;
+	}
+
+	/* create debugfs hot data files */
+	for (i = 0; i < ARRAY_SIZE(hot_debugfs); i++) {
+		dentry = debugfs_create_file(hot_debugfs[i].name,
+					S_IFREG | S_IRUSR | S_IWUSR,
+					sb->s_hot_root->debugfs_dentry,
+					sb->s_hot_root,
+					hot_debugfs[i].fops);
+		if (IS_ERR(dentry)) {
+			ret = PTR_ERR(dentry);
+			goto err;
+		}
+	}
+
+	return 0;
+
+err:
+	debugfs_remove_recursive(sb->s_hot_root->debugfs_dentry);
+
+root_err:
+	if (list_empty(&hot_debugfs_root->d_subdirs)) {
+		debugfs_remove(hot_debugfs_root);
+		hot_debugfs_root = NULL;
+	}
+
+	return ret;
+}
+
+/* remove dentries for debugsfs */
+static void hot_debugfs_exit(struct super_block *sb)
+{
+	/* remove all debugfs entries recursively from the volume root */
+	debugfs_remove_recursive(sb->s_hot_root->debugfs_dentry);
+
+	if (list_empty(&hot_debugfs_root->d_subdirs)) {
+		debugfs_remove(hot_debugfs_root);
+		hot_debugfs_root = NULL;
+	}
+}
+
 /*
  * Initialize kmem cache for hot_inode_item and hot_range_item.
  */
@@ -715,6 +1165,7 @@ static struct hot_info *hot_tree_init(struct super_block *sb)
 	spin_lock_init(&root->t_lock);
 	spin_lock_init(&root->m_lock);
 	atomic_set(&root->hot_map_nr, 0);
+	atomic_set(&root->run_debugfs, 0);
 
 	for (i = 0; i < MAP_SIZE; i++) {
 		for (j = 0; j < MAX_TYPES; j++)
@@ -775,6 +1226,7 @@ static void hot_tree_exit(struct hot_info *root)
 int hot_track_init(struct super_block *sb)
 {
 	struct hot_info *root;
+	int ret;
 
 	root = hot_tree_init(sb);
 	if (IS_ERR(root))
@@ -782,9 +1234,21 @@ int hot_track_init(struct super_block *sb)
 
 	sb->s_hot_root = root;
 
+	ret = hot_debugfs_init(sb);
+	if (ret) {
+		printk(KERN_ERR "%s: hot_debugfs_init error: %d\n",
+				__func__, ret);
+		goto out;
+	}
+
 	printk(KERN_INFO "VFS: Turning on hot data tracking\n");
 
 	return 0;
+
+out:
+	hot_tree_exit(root);
+	sb->s_hot_root = NULL;
+	return ret;
 }
 EXPORT_SYMBOL_GPL(hot_track_init);
 
@@ -797,6 +1261,7 @@ void hot_track_exit(struct super_block *sb)
 {
 	struct hot_info *root = sb->s_hot_root;
 
+	hot_debugfs_exit(sb);
 	hot_tree_exit(root);
 	sb->s_hot_root = NULL;
 	kfree(root);

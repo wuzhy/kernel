@@ -94,6 +94,8 @@ struct hot_info {
 	struct workqueue_struct *update_wq;
 	struct delayed_work update_work;
 	struct shrinker hot_shrink;
+	struct dentry *debugfs_dentry;
+	atomic_t run_debugfs;
 };
 
 extern void __init hot_cache_init(void);
