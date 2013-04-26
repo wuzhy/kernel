@@ -54,7 +54,7 @@ static void hot_range_item_init(struct hot_range_item *hr,
 			struct hot_inode_item *he, loff_t start)
 {
 	hr->start = start;
-	hr->len = hot_shift(1, RANGE_BITS, true);
+	hr->len = hot_shift(1, he->hot_root->hot_type->range_bits, true);
 	hr->hot_inode = he;
 	hr->storage_type = -1;
 	hot_comm_item_init(&hr->hot_range, TYPE_RANGE);
@@ -273,10 +273,11 @@ struct hot_range_item
 {
 	struct rb_node **p;
 	struct rb_node *parent = NULL;
+	struct hot_info *root = he->hot_root;
 	struct hot_comm_item *ci;
 	struct hot_range_item *hr, *hr_new = NULL;
 
-	start = hot_shift(start, RANGE_BITS, true);
+	start = hot_shift(start, root->hot_type->range_bits, true);
 
 	/* walk tree to find insertion point */
 redo:
@@ -367,13 +368,13 @@ static void hot_freq_update(struct hot_info *root,
 
 	if (write) {
 		freq_data->nr_writes += 1;
-		hot_freq_calc(freq_data->last_write_time,
+		HOT_FREQ_CALC(root, freq_data->last_write_time,
 				cur_time,
 				&freq_data->avg_delta_writes);
 		freq_data->last_write_time = cur_time;
 	} else {
 		freq_data->nr_reads += 1;
-		hot_freq_calc(freq_data->last_read_time,
+		HOT_FREQ_CALC(root, freq_data->last_read_time,
 				cur_time,
 				&freq_data->avg_delta_reads);
 		freq_data->last_read_time = cur_time;
@@ -398,7 +399,7 @@ static void hot_freq_update(struct hot_info *root,
  * the *_COEFF_POWER values and combined to a single temperature
  * value.
  */
-u32 hot_temp_calc(struct hot_comm_item *ci)
+static u32 hot_temp_calc(struct hot_comm_item *ci)
 {
 	u32 result = 0;
 	struct hot_freq_data *freq_data = &ci->hot_freq_data;
@@ -470,7 +471,7 @@ u32 hot_temp_calc(struct hot_comm_item *ci)
 static bool hot_map_update(struct hot_info *root,
 			struct hot_comm_item *ci)
 {
-	u32 temp = hot_temp_calc(ci);
+	u32 temp = HOT_TEMP_CALC(root, ci);
 	u8 cur_temp, prev_temp;
 	bool flag = false;
 
@@ -1164,10 +1165,10 @@ void hot_update_freqs(struct inode *inode, loff_t start,
 	 * Align ranges on range size boundary
 	 * to prevent proliferation of range structs
 	 */
-	range_size  = hot_shift(1, RANGE_BITS, true);
+	range_size  = hot_shift(1, root->hot_type->range_bits, true);
 	end = hot_shift((start + len + range_size - 1),
-			RANGE_BITS, false);
-	cur = hot_shift(start, RANGE_BITS, false);
+			root->hot_type->range_bits, false);
+	cur = hot_shift(start, root->hot_type->range_bits, false);
 	for (; cur < end; cur++) {
 		hr = hot_range_item_lookup(he, cur, 1);
 		if (IS_ERR(hr)) {
@@ -1208,6 +1209,15 @@ static struct hot_info *hot_tree_init(struct super_block *sb)
 		for (j = 0; j < MAX_TYPES; j++)
 			INIT_LIST_HEAD(&root->hot_map[j][i]);
 	}
+
+	/* Get hot type for specific FS */
+	root->hot_type = &sb->s_type->hot_type;
+	if (!HOT_FREQ_FN_EXIST(root))
+		SET_HOT_FREQ_FN(root, hot_freq_calc);
+	if (!HOT_TEMP_FN_EXIST(root))
+		SET_HOT_TEMP_FN(root, hot_temp_calc);
+	if (root->hot_type->range_bits == 0)
+		root->hot_type->range_bits = RANGE_BITS;
 
 	root->update_wq = alloc_workqueue(
 			"hot_update_wq", WQ_NON_REENTRANT, 0);

@@ -1817,6 +1817,7 @@ struct file_system_type {
 	struct dentry *(*mount) (struct file_system_type *, int,
 		       const char *, void *);
 	void (*kill_sb) (struct super_block *);
+	struct hot_type hot_type;
 	struct module *owner;
 	struct file_system_type * next;
 	struct hlist_head fs_supers;

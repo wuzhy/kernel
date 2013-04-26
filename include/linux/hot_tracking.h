@@ -98,6 +98,24 @@ struct hot_range_item {
 	int storage_type;			/* type of storage */
 };
 
+typedef void (hot_freq_calc_fn) (struct timespec old_atime,
+				struct timespec cur_time, u64 *avg);
+typedef u32 (hot_temp_calc_fn) (struct hot_comm_item *ci);
+
+struct hot_func_ops {
+	hot_freq_calc_fn *hot_freq_calc;
+	hot_temp_calc_fn *hot_temp_calc;
+};
+
+/* identifies an hot type */
+struct hot_type {
+	u64 range_bits;
+	struct hot_func_ops ops;	/* fields provided by specific FS */
+};
+
+#define HOT_TEMP_CALC(root, ci) \
+	((root)->hot_type->ops.hot_temp_calc(ci))
+
 struct hot_info {
 	struct rb_root hot_inode_tree;
 	spinlock_t t_lock;				/* protect above tree */
@@ -106,6 +124,7 @@ struct hot_info {
 	atomic_t hot_map_nr;
 	struct workqueue_struct *update_wq;
 	struct delayed_work update_work;
+	struct hot_type *hot_type;
 	struct shrinker hot_shrink;
 	struct dentry *debugfs_dentry;
 	atomic_t run_debugfs;
@@ -138,7 +157,6 @@ extern struct hot_inode_item *hot_inode_item_lookup(struct hot_info *root,
 extern struct hot_range_item *hot_range_item_lookup(struct hot_inode_item *he,
 						loff_t start, int alloc);
 extern void hot_inode_item_delete(struct inode *inode);
-extern u32 hot_temp_calc(struct hot_comm_item *ci);
 
 static inline u64 hot_shift(u64 counter, u32 bits, bool dir)
 {

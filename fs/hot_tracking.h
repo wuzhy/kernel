@@ -40,6 +40,19 @@
 #define AVW_DIVIDER_POWER 40 /* AVW - average delta between recent writes(ns) */
 #define AVW_COEFF_POWER 0
 
+#define HOT_FREQ_FN_EXIST(root) \
+	((root)->hot_type->ops.hot_freq_calc)
+#define HOT_TEMP_FN_EXIST(root) \
+	((root)->hot_type->ops.hot_temp_calc)
+
+#define HOT_FREQ_CALC(root, lt, ct, avg) \
+	((root)->hot_type->ops.hot_freq_calc(lt, ct, avg))
+
+#define SET_HOT_FREQ_FN(root, fn) \
+	(root)->hot_type->ops.hot_freq_calc = fn
+#define SET_HOT_TEMP_FN(root, fn) \
+	(root)->hot_type->ops.hot_temp_calc = fn
+
 struct hot_debugfs {
 	const char *name;
 	const struct file_operations *fops;

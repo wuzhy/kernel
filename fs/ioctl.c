@@ -585,7 +585,7 @@ static int ioctl_heat_info(struct file *file, void __user *argp)
 		 * got a request for live temperature,
 		 * call hot_calc_temp() to recalculate
 		 */
-		heat_info.temp = hot_temp_calc(&he->hot_inode);
+		heat_info.temp = HOT_TEMP_CALC(he->hot_root, &he->hot_inode);
 	} else {
 		/* not live temperature, get it from the map list */
 		heat_info.temp = he->hot_inode.hot_freq_data.last_temp;
