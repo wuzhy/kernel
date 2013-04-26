@@ -35,6 +35,7 @@ enum {
 
 enum {
 	HOT_DELETING,
+	HOT_IN_LIST,
 };
 
 /*
@@ -60,6 +61,7 @@ struct hot_comm_item {
 	struct rb_node rb_node;			/* rbtree index */
 	unsigned long delete_flag;
 	struct rcu_head c_rcu;
+	struct list_head track_list;		/* link to *_map[] */
 };
 
 /* An item representing an inode and its access frequency */
@@ -88,6 +90,8 @@ struct hot_info {
 	spinlock_t t_lock;				/* protect above tree */
 	struct list_head hot_map[MAX_TYPES][MAP_SIZE];	/* map of inode temp */
 	spinlock_t m_lock;
+	struct workqueue_struct *update_wq;
+	struct delayed_work update_work;
 };
 
 extern void __init hot_cache_init(void);
