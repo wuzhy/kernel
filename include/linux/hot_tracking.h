@@ -90,8 +90,10 @@ struct hot_info {
 	spinlock_t t_lock;				/* protect above tree */
 	struct list_head hot_map[MAX_TYPES][MAP_SIZE];	/* map of inode temp */
 	spinlock_t m_lock;
+	atomic_t hot_map_nr;
 	struct workqueue_struct *update_wq;
 	struct delayed_work update_work;
+	struct shrinker hot_shrink;
 };
 
 extern void __init hot_cache_init(void);

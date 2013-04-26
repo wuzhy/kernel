@@ -103,8 +103,10 @@ static void hot_comm_item_unlink(struct hot_info *root,
 		}
 		spin_unlock(&root->m_lock);
 
-		if (flag)
+		if (flag) {
+			atomic_dec(&root->hot_map_nr);
 			hot_comm_item_put(ci);
+		}
 
 		if (ci->hot_freq_data.flags == TYPE_RANGE) {
 			struct hot_range_item *hr = container_of(ci,
@@ -464,8 +466,10 @@ static bool hot_map_update(struct hot_info *root,
 		}
 		spin_unlock(&root->m_lock);
 
-		if (!flag)
+		if (!flag) {
+			atomic_inc(&root->hot_map_nr);
 			hot_comm_item_get(ci);
+		}
 
 		spin_lock(&root->m_lock);
 		if (test_bit(HOT_DELETING, &ci->delete_flag)) {
@@ -521,6 +525,39 @@ static int hot_temp_cmp(void *priv, struct list_head *a,
 	if (diff < 0)
 		return 1;
 	return 0;
+}
+
+static void hot_item_evictor(struct hot_info *root, unsigned long work,
+			unsigned long (*work_get)(struct hot_info *root))
+{
+	int i;
+
+	if (work <= 0)
+		return;
+
+	for (i = 0; i < MAP_SIZE; i++) {
+		struct hot_comm_item *ci;
+		unsigned long work_prev;
+
+		rcu_read_lock();
+		if (list_empty(&root->hot_map[TYPE_INODE][i])) {
+			rcu_read_unlock();
+			continue;
+		}
+
+		list_for_each_entry_rcu(ci, &root->hot_map[TYPE_INODE][i],
+					track_list) {
+			work_prev = work_get(root);
+			hot_comm_item_unlink(root, ci);
+			work -= (work_prev - work_get(root));
+			if (work <= 0)
+				break;
+		}
+		rcu_read_unlock();
+
+		if (work <= 0)
+			break;
+	}
 }
 
 /*
@@ -584,6 +621,34 @@ void __init hot_cache_init(void)
 		kmem_cache_destroy(hot_inode_item_cachep);
 }
 EXPORT_SYMBOL_GPL(hot_cache_init);
+
+static inline unsigned long hot_nr_get(struct hot_info *root)
+{
+	return (unsigned long)atomic_read(&root->hot_map_nr);
+}
+
+static void hot_prune_map(struct hot_info *root, unsigned long nr)
+{
+	hot_item_evictor(root, nr, hot_nr_get);
+}
+
+/* The shrinker callback function */
+static int hot_track_prune(struct shrinker *shrink,
+			struct shrink_control *sc)
+{
+	struct hot_info *root =
+		container_of(shrink, struct hot_info, hot_shrink);
+
+	if (sc->nr_to_scan == 0)
+		return atomic_read(&root->hot_map_nr) / 2;
+
+	if (!(sc->gfp_mask & __GFP_FS))
+		return -1;
+
+	hot_prune_map(root, sc->nr_to_scan);
+
+	return atomic_read(&root->hot_map_nr);
+}
 
 /*
  * Main function to update i/o access frequencies, and it will be called
@@ -649,6 +714,7 @@ static struct hot_info *hot_tree_init(struct super_block *sb)
 	root->hot_inode_tree = RB_ROOT;
 	spin_lock_init(&root->t_lock);
 	spin_lock_init(&root->m_lock);
+	atomic_set(&root->hot_map_nr, 0);
 
 	for (i = 0; i < MAP_SIZE; i++) {
 		for (j = 0; j < MAX_TYPES; j++)
@@ -669,6 +735,11 @@ static struct hot_info *hot_tree_init(struct super_block *sb)
 	queue_delayed_work(root->update_wq, &root->update_work,
 		msecs_to_jiffies(HOT_UPDATE_INTERVAL * MSEC_PER_SEC));
 
+	/* Register a shrinker callback */
+	root->hot_shrink.shrink = hot_track_prune;
+	root->hot_shrink.seeks = DEFAULT_SEEKS;
+	register_shrinker(&root->hot_shrink);
+
 	return root;
 }
 
@@ -680,6 +751,7 @@ static void hot_tree_exit(struct hot_info *root)
 	struct rb_node *node;
 	struct hot_comm_item *ci;
 
+	unregister_shrinker(&root->hot_shrink);
 	cancel_delayed_work_sync(&root->update_work);
 	destroy_workqueue(root->update_wq);
 
