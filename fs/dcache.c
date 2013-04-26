@@ -37,6 +37,7 @@
 #include <linux/rculist_bl.h>
 #include <linux/prefetch.h>
 #include <linux/ratelimit.h>
+#include <linux/hot_tracking.h>
 #include "internal.h"
 #include "mount.h"
 
@@ -3094,4 +3095,5 @@ void __init vfs_caches_init(unsigned long mempages)
 	mnt_init();
 	bdev_cache_init();
 	chrdev_init();
+	hot_cache_init();
 }
