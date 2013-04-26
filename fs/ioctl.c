@@ -15,6 +15,7 @@
 #include <linux/writeback.h>
 #include <linux/buffer_head.h>
 #include <linux/falloc.h>
+#include <linux/hot_tracking.h>
 
 #include <asm/ioctls.h>
 
@@ -537,6 +538,72 @@ static int ioctl_fsthaw(struct file *filp)
 }
 
 /*
+ * Retrieve information about access frequency for the given file. Return it in
+ * a userspace-friendly struct for btrfsctl (or another tool) to parse.
+ *
+ * The temperature that is returned can be "live" -- that is, recalculated when
+ * the ioctl is called -- or it can be returned from the map list, reflecting
+ * the (possibly old) value that the system will use when considering files
+ * for migration. This behavior is determined by hot_heat_info->live.
+ */
+static int ioctl_heat_info(struct file *file, void __user *argp)
+{
+	struct inode *inode = file->f_dentry->d_inode;
+	struct hot_heat_info heat_info;
+	struct hot_inode_item *he;
+	int ret = 0;
+
+	if (copy_from_user((void *)&heat_info,
+			argp,
+			sizeof(struct hot_heat_info)) != 0) {
+		ret = -EFAULT;
+		goto err;
+	}
+
+	he = hot_inode_item_lookup(inode->i_sb->s_hot_root, inode->i_ino, 0);
+	if (IS_ERR(he)) {
+		/* we don't have any info on this file yet */
+		ret = -ENODATA;
+		goto err;
+	}
+
+	heat_info.avg_delta_reads =
+		(__u64) he->hot_inode.hot_freq_data.avg_delta_reads;
+	heat_info.avg_delta_writes =
+		(__u64) he->hot_inode.hot_freq_data.avg_delta_writes;
+	heat_info.last_read_time =
+	(__u64) timespec_to_ns(&he->hot_inode.hot_freq_data.last_read_time);
+	heat_info.last_write_time =
+	(__u64) timespec_to_ns(&he->hot_inode.hot_freq_data.last_write_time);
+	heat_info.num_reads =
+		(__u32) he->hot_inode.hot_freq_data.nr_reads;
+	heat_info.num_writes =
+		(__u32) he->hot_inode.hot_freq_data.nr_writes;
+
+	if (heat_info.live > 0) {
+		/*
+		 * got a request for live temperature,
+		 * call hot_calc_temp() to recalculate
+		 */
+		heat_info.temp = hot_temp_calc(&he->hot_inode);
+	} else {
+		/* not live temperature, get it from the map list */
+		heat_info.temp = he->hot_inode.hot_freq_data.last_temp;
+	}
+
+	hot_comm_item_put(&he->hot_inode);
+
+	if (copy_to_user(argp, (void *)&heat_info,
+			sizeof(struct hot_heat_info))) {
+		ret = -EFAULT;
+		goto err;
+	}
+
+err:
+	return ret;
+}
+
+/*
  * When you add any new common ioctls to the switches above and below
  * please update compat_sys_ioctl() too.
  *
@@ -590,6 +657,9 @@ int do_vfs_ioctl(struct file *filp, unsigned int fd, unsigned int cmd,
 
 	case FIGETBSZ:
 		return put_user(inode->i_sb->s_blocksize, argp);
+
+	case FS_IOC_GET_HEAT_INFO:
+		return ioctl_heat_info(filp, argp);
 
 	default:
 		if (S_ISREG(inode->i_mode))

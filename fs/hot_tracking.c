@@ -379,7 +379,7 @@ static void hot_freq_update(struct hot_info *root,
  * the *_COEFF_POWER values and combined to a single temperature
  * value.
  */
-static u32 hot_temp_calc(struct hot_comm_item *ci)
+u32 hot_temp_calc(struct hot_comm_item *ci)
 {
 	u32 result = 0;
 	struct hot_freq_data *freq_data = &ci->hot_freq_data;

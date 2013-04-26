@@ -17,6 +17,18 @@
 
 #include <linux/types.h>
 
+struct hot_heat_info {
+	__u64 avg_delta_reads;
+	__u64 avg_delta_writes;
+	__u64 last_read_time;
+	__u64 last_write_time;
+	__u32 num_reads;
+	__u32 num_writes;
+	__u32 temp;
+	__u8 live;
+	__u8 resv[3];
+};
+
 #ifdef __KERNEL__
 
 #include <linux/rbtree.h>
@@ -98,6 +110,14 @@ struct hot_info {
 	atomic_t run_debugfs;
 };
 
+/*
+ * Hot data tracking ioctls:
+ *
+ * HOT_INFO - retrieve info on frequency of access
+ */
+#define FS_IOC_GET_HEAT_INFO _IOR('f', 17, \
+			struct hot_heat_info)
+
 extern void __init hot_cache_init(void);
 extern int hot_track_init(struct super_block *sb);
 extern void hot_track_exit(struct super_block *sb);
@@ -109,6 +129,7 @@ extern struct hot_inode_item *hot_inode_item_lookup(struct hot_info *root,
 extern struct hot_range_item *hot_range_item_lookup(struct hot_inode_item *he,
 						loff_t start, int alloc);
 extern void hot_inode_item_delete(struct inode *inode);
+extern u32 hot_temp_calc(struct hot_comm_item *ci);
 
 static inline u64 hot_shift(u64 counter, u32 bits, bool dir)
 {
