@@ -40,6 +40,7 @@
 #include <linux/list_lru.h>
 #include "internal.h"
 #include "mount.h"
+#include "hot_tracking.h"
 
 /*
  * Usage:
@@ -3437,4 +3438,5 @@ void __init vfs_caches_init(unsigned long mempages)
 	mnt_init();
 	bdev_cache_init();
 	chrdev_init();
+	hot_cache_init();
 }

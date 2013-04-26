@@ -29,6 +29,7 @@
 #include <linux/lockdep.h>
 #include <linux/percpu-rwsem.h>
 #include <linux/blk_types.h>
+#include <linux/hot_tracking.h>
 
 #include <asm/byteorder.h>
 #include <uapi/linux/fs.h>
@@ -1323,6 +1324,9 @@ struct super_block {
 
 	/* AIO completions deferred from interrupt context */
 	struct workqueue_struct *s_dio_done_wq;
+
+	/* Hot data tracking*/
+	struct hot_info *s_hot_root;
 
 	/*
 	 * Keep the lru lists last in the structure so they always sit on their
