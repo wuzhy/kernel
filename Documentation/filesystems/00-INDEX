@@ -122,3 +122,5 @@ xfs.txt
 	- info and mount options for the XFS filesystem.
 xip.txt
 	- info on execute-in-place for file mappings.
+hot_tracking.txt
+	- info on hot data tracking in VFS layer
