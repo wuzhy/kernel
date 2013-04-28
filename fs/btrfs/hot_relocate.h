@@ -18,10 +18,6 @@
 #include "btrfs_inode.h"
 #include "volumes.h"
 
-#define HOT_RELOC_INTERVAL  120
-#define HOT_RELOC_THRESHOLD 150
-#define HOT_RELOC_MAX_ITEMS 250
-
 #define HEAT_MAX_VALUE    (MAP_SIZE - 1)
 #define HIGH_WATER_LEVEL  75 /* when to raise the threshold */
 #define LOW_WATER_LEVEL   50 /* when to lower the threshold */
@@ -32,7 +28,6 @@
 struct hot_reloc {
 	struct btrfs_fs_info *fs_info;
 	struct list_head hot_relocq[MAX_RELOC_TYPES];
-	int thresh;
 	struct task_struct *hot_reloc_kthread;
 	struct mutex hot_reloc_mutex;
 };

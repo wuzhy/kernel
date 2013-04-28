@@ -62,6 +62,7 @@
 #include <linux/capability.h>
 #include <linux/binfmts.h>
 #include <linux/sched/sysctl.h>
+#include <linux/btrfs.h>
 
 #include <asm/uaccess.h>
 #include <asm/processor.h>
@@ -1633,6 +1634,27 @@ static struct ctl_table fs_table[] = {
 	{
 		.procname	= "hot-update-interval",
 		.data		= &sysctl_hot_update_interval,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "hot-reloc-thresh",
+		.data		= &sysctl_hot_reloc_thresh,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "hot-reloc-interval",
+		.data		= &sysctl_hot_reloc_interval,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "hot-reloc-max-items",
+		.data		= &sysctl_hot_reloc_max_items,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,

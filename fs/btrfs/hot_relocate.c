@@ -25,7 +25,7 @@
  * The relocation code below operates on the heat map lists to identify
  * hot or cold data logical file ranges that are candidates for relocation.
  * The triggering mechanism for relocation is controlled by a global heat
- * threshold integer value (HOT_RELOC_THRESHOLD). Ranges are
+ * threshold integer value (sysctl_hot_reloc_thresh). Ranges are
  * queued for relocation by the periodically executing relocate kthread,
  * which updates the global heat threshold and responds to space pressure
  * on the nonrotating disks.
@@ -52,6 +52,15 @@
  * BTRFS_BLOCK_GROUP_DATA_NONROT to nonrotating disks.
  * (assuming, critically, the HOT_MOVE option is set at mount time).
  */
+
+int sysctl_hot_reloc_thresh = 150;
+EXPORT_SYMBOL_GPL(sysctl_hot_reloc_thresh);
+
+int sysctl_hot_reloc_interval __read_mostly = 120;
+EXPORT_SYMBOL_GPL(sysctl_hot_reloc_interval);
+
+int sysctl_hot_reloc_max_items __read_mostly = 250;
+EXPORT_SYMBOL_GPL(sysctl_hot_reloc_max_items);
 
 /*
  * Returns the ratio of nonrotating disks that are full.
@@ -103,7 +112,7 @@ static int hot_calc_nonrot_ratio(struct hot_reloc *hot_reloc)
 static int hot_update_threshold(struct hot_reloc *hot_reloc,
 				int update)
 {
-	int thresh = hot_reloc->thresh;
+	int thresh = sysctl_hot_reloc_thresh;
 	int ratio = hot_calc_nonrot_ratio(hot_reloc);
 
 	/* Sometimes update global threshold, others not */
@@ -127,7 +136,7 @@ static int hot_update_threshold(struct hot_reloc *hot_reloc,
 			thresh = 0;
 	}
 
-	hot_reloc->thresh = thresh;
+	sysctl_hot_reloc_thresh = thresh;
 	return ratio;
 }
 
@@ -215,7 +224,7 @@ static int hot_queue_extent(struct hot_reloc *hot_reloc,
 			*counter = *counter + 1;
 		}
 
-		if (*counter >= HOT_RELOC_MAX_ITEMS)
+		if (*counter >= sysctl_hot_reloc_max_items)
 			break;
 
 		if (kthread_should_stop()) {
@@ -293,7 +302,7 @@ again:
 		while (1) {
 			lock_extent(tree, page_start, page_end);
 			ordered = btrfs_lookup_ordered_extent(inode,
-							page_start);
+							      page_start);
 			unlock_extent(tree, page_start, page_end);
 			if (!ordered)
 				break;
@@ -559,7 +568,7 @@ void hot_do_relocate(struct hot_reloc *hot_reloc)
 
 	run++;
 	ratio = hot_update_threshold(hot_reloc, !(run % 15));
-	thresh = hot_reloc->thresh;
+	thresh = sysctl_hot_reloc_thresh;
 
 	INIT_LIST_HEAD(&hot_reloc->hot_relocq[TYPE_NONROT]);
 
@@ -569,7 +578,7 @@ void hot_do_relocate(struct hot_reloc *hot_reloc)
 	if (count_to_hot == 0)
 		return;
 
-	count_to_cold = HOT_RELOC_MAX_ITEMS;
+	count_to_cold = sysctl_hot_reloc_max_items;
 
 	/* Don't move cold data to HDD unless there's space pressure */
 	if (ratio < HIGH_WATER_LEVEL)
@@ -653,7 +662,7 @@ static int hot_relocate_kthread(void *arg)
 	unsigned long delay;
 
 	do {
-		delay = HZ * HOT_RELOC_INTERVAL;
+		delay = HZ * sysctl_hot_reloc_interval;
 		if (mutex_trylock(&hot_reloc->hot_reloc_mutex)) {
 			hot_do_relocate(hot_reloc);
 			mutex_unlock(&hot_reloc->hot_reloc_mutex);
@@ -685,7 +694,6 @@ int hot_relocate_init(struct btrfs_fs_info *fs_info)
 
 	fs_info->hot_reloc = hot_reloc;
 	hot_reloc->fs_info = fs_info;
-	hot_reloc->thresh = HOT_RELOC_THRESHOLD;
 	for (i = 0; i < MAX_RELOC_TYPES; i++)
 		INIT_LIST_HEAD(&hot_reloc->hot_relocq[i]);
 	mutex_init(&hot_reloc->hot_reloc_mutex);
