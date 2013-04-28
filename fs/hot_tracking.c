@@ -44,6 +44,7 @@ static void hot_comm_item_init(struct hot_comm_item *ci, int type)
 	clear_bit(HOT_IN_LIST, &ci->delete_flag);
 	clear_bit(HOT_DELETING, &ci->delete_flag);
 	INIT_LIST_HEAD(&ci->track_list);
+	INIT_LIST_HEAD(&ci->reloc_list);
 	memset(&ci->hot_freq_data, 0, sizeof(struct hot_freq_data));
 	ci->hot_freq_data.avg_delta_reads = (u64) -1;
 	ci->hot_freq_data.avg_delta_writes = (u64) -1;

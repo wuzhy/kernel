@@ -75,6 +75,7 @@ struct hot_comm_item {
 	unsigned long delete_flag;
 	struct rcu_head c_rcu;
 	struct list_head track_list;		/* link to *_map[] */
+	struct list_head reloc_list;		/* used in hot relocation*/
 };
 
 /* An item representing an inode and its access frequency */
