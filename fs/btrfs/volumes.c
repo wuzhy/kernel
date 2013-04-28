@@ -1451,6 +1451,9 @@ int btrfs_rm_device(struct btrfs_root *root, char *device_path)
 		all_avail = root->fs_info->avail_data_alloc_bits |
 			    root->fs_info->avail_system_alloc_bits |
 			    root->fs_info->avail_metadata_alloc_bits;
+		if (btrfs_test_opt(root, HOT_MOVE))
+			all_avail |=
+				root->fs_info->avail_data_nonrot_alloc_bits;
 	} while (read_seqretry(&root->fs_info->profiles_lock, seq));
 
 	num_devices = root->fs_info->fs_devices->num_devices;
@@ -3728,7 +3731,8 @@ static int __btrfs_alloc_chunk(struct btrfs_trans_handle *trans,
 	devs_increment = btrfs_raid_array[index].devs_increment;
 	ncopies = btrfs_raid_array[index].ncopies;
 
-	if (type & BTRFS_BLOCK_GROUP_DATA) {
+	if (type & BTRFS_BLOCK_GROUP_DATA ||
+		type & BTRFS_BLOCK_GROUP_DATA_NONROT) {
 		max_stripe_size = 1024 * 1024 * 1024;
 		max_chunk_size = 10 * max_stripe_size;
 	} else if (type & BTRFS_BLOCK_GROUP_METADATA) {
@@ -3767,8 +3771,29 @@ static int __btrfs_alloc_chunk(struct btrfs_trans_handle *trans,
 		struct btrfs_device *device;
 		u64 max_avail;
 		u64 dev_offset;
+		int dev_rot;
+		int skip = 0;
 
 		device = list_entry(cur, struct btrfs_device, dev_alloc_list);
+
+		/*
+		 * If HOT_MOVE is set, the chunk type being allocated
+		 * determines which disks the data may be allocated on.
+		 * This can cause problems if, for example, the data alloc
+		 * profile is RAID0 and there are only two devices, 1 SSD +
+		 * 1 HDD. All allocations to BTRFS_BLOCK_GROUP_DATA_NONROT
+		 * in this config will return -ENOSPC as the allocation code
+		 * can't find allowable space for the second stripe.
+		 */
+		dev_rot = !blk_queue_nonrot(bdev_get_queue(device->bdev));
+		if (btrfs_test_opt(extent_root, HOT_MOVE)) {
+			int ret1 = type & (BTRFS_BLOCK_GROUP_DATA |
+				BTRFS_BLOCK_GROUP_METADATA |
+				BTRFS_BLOCK_GROUP_SYSTEM) && !dev_rot;
+			int ret2 = type & BTRFS_BLOCK_GROUP_DATA_NONROT && dev_rot;
+			if (ret1 || ret2)
+				skip = 1;
+		}
 
 		cur = cur->next;
 
@@ -3778,7 +3803,7 @@ static int __btrfs_alloc_chunk(struct btrfs_trans_handle *trans,
 			continue;
 		}
 
-		if (!device->in_fs_metadata ||
+		if (skip || !device->in_fs_metadata ||
 		    device->is_tgtdev_for_dev_replace)
 			continue;
 

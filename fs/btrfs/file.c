@@ -41,6 +41,7 @@
 #include "locking.h"
 #include "compat.h"
 #include "volumes.h"
+#include "hot_relocate.h"
 
 static struct kmem_cache *btrfs_inode_defrag_cachep;
 /*
@@ -500,7 +501,7 @@ static void btrfs_drop_pages(struct page **pages, size_t num_pages)
 int btrfs_dirty_pages(struct btrfs_root *root, struct inode *inode,
 			     struct page **pages, size_t num_pages,
 			     loff_t pos, size_t write_bytes,
-			     struct extent_state **cached)
+			     struct extent_state **cached, int flag)
 {
 	int err = 0;
 	int i;
@@ -514,6 +515,11 @@ int btrfs_dirty_pages(struct btrfs_root *root, struct inode *inode,
 	num_bytes = ALIGN(write_bytes + pos - start_pos, root->sectorsize);
 
 	end_of_last_block = start_pos + num_bytes - 1;
+
+	if (btrfs_test_opt(root, HOT_MOVE))
+		set_extent_hot(inode, start_pos, end_of_last_block,
+				cached, flag, 0);
+
 	err = btrfs_set_extent_delalloc(inode, start_pos, end_of_last_block,
 					cached);
 	if (err)
@@ -1294,7 +1300,8 @@ again:
 
 		clear_extent_bit(&BTRFS_I(inode)->io_tree, start_pos,
 				  last_pos - 1, EXTENT_DIRTY | EXTENT_DELALLOC |
-				  EXTENT_DO_ACCOUNTING | EXTENT_DEFRAG,
+				  EXTENT_DO_ACCOUNTING | EXTENT_DEFRAG |
+				  EXTENT_HOT | EXTENT_COLD,
 				  0, 0, &cached_state, GFP_NOFS);
 		unlock_extent_cached(&BTRFS_I(inode)->io_tree,
 				     start_pos, last_pos - 1, &cached_state,
@@ -1350,6 +1357,7 @@ static noinline ssize_t __btrfs_buffered_write(struct file *file,
 				    PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
 		size_t dirty_pages;
 		size_t copied;
+		int flag = TYPE_ROT;
 
 		WARN_ON(num_pages > nrptrs);
 
@@ -1363,7 +1371,7 @@ static noinline ssize_t __btrfs_buffered_write(struct file *file,
 		}
 
 		ret = btrfs_delalloc_reserve_space(inode,
-					num_pages << PAGE_CACHE_SHIFT);
+					num_pages << PAGE_CACHE_SHIFT, &flag);
 		if (ret)
 			break;
 
@@ -1377,7 +1385,7 @@ static noinline ssize_t __btrfs_buffered_write(struct file *file,
 				    force_page_uptodate);
 		if (ret) {
 			btrfs_delalloc_release_space(inode,
-					num_pages << PAGE_CACHE_SHIFT);
+					num_pages << PAGE_CACHE_SHIFT, flag);
 			break;
 		}
 
@@ -1416,16 +1424,16 @@ static noinline ssize_t __btrfs_buffered_write(struct file *file,
 			}
 			btrfs_delalloc_release_space(inode,
 					(num_pages - dirty_pages) <<
-					PAGE_CACHE_SHIFT);
+					PAGE_CACHE_SHIFT, flag);
 		}
 
 		if (copied > 0) {
 			ret = btrfs_dirty_pages(root, inode, pages,
 						dirty_pages, pos, copied,
-						NULL);
+						NULL, flag);
 			if (ret) {
 				btrfs_delalloc_release_space(inode,
-					dirty_pages << PAGE_CACHE_SHIFT);
+					dirty_pages << PAGE_CACHE_SHIFT, flag);
 				btrfs_drop_pages(pages, num_pages);
 				break;
 			}
@@ -2150,6 +2158,7 @@ static long btrfs_fallocate(struct file *file, int mode,
 	u64 locked_end;
 	struct extent_map *em;
 	int blocksize = BTRFS_I(inode)->root->sectorsize;
+	int flag = TYPE_ROT;
 	int ret;
 
 	alloc_start = round_down(offset, blocksize);
@@ -2166,7 +2175,7 @@ static long btrfs_fallocate(struct file *file, int mode,
 	 * Make sure we have enough space before we do the
 	 * allocation.
 	 */
-	ret = btrfs_check_data_free_space(inode, alloc_end - alloc_start);
+	ret = btrfs_check_data_free_space(inode, alloc_end - alloc_start, &flag);
 	if (ret)
 		return ret;
 	if (root->fs_info->quota_enabled) {
@@ -2281,7 +2290,7 @@ out:
 		btrfs_qgroup_free(root, alloc_end - alloc_start);
 out_reserve_fail:
 	/* Let go of our reservation. */
-	btrfs_free_reserved_data_space(inode, alloc_end - alloc_start);
+	btrfs_free_reserved_data_space(inode, alloc_end - alloc_start, flag);
 	return ret;
 }
 

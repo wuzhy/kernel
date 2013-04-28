@@ -1004,7 +1004,7 @@ static int __btrfs_write_out_cache(struct btrfs_root *root, struct inode *inode,
 	io_ctl_zero_remaining_pages(&io_ctl);
 
 	ret = btrfs_dirty_pages(root, inode, io_ctl.pages, io_ctl.num_pages,
-				0, i_size_read(inode), &cached_state);
+				0, i_size_read(inode), &cached_state, TYPE_ROT);
 	io_ctl_drop_pages(&io_ctl);
 	unlock_extent_cached(&BTRFS_I(inode)->io_tree, 0,
 			     i_size_read(inode) - 1, &cached_state, GFP_NOFS);

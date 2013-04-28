@@ -58,6 +58,7 @@
 #include "rcu-string.h"
 #include "dev-replace.h"
 #include "free-space-cache.h"
+#include "hot_relocate.h"
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/btrfs.h>
@@ -1521,7 +1522,8 @@ static int btrfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	mutex_lock(&fs_info->chunk_mutex);
 	rcu_read_lock();
 	list_for_each_entry_rcu(found, head, list) {
-		if (found->flags & BTRFS_BLOCK_GROUP_DATA) {
+		if ((found->flags & BTRFS_BLOCK_GROUP_DATA) ||
+			(found->flags & BTRFS_BLOCK_GROUP_DATA_NONROT)) {
 			total_free_data += found->disk_total - found->disk_used;
 			total_free_data -=
 				btrfs_account_ro_block_groups_free_space(found);

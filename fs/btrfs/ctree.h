@@ -963,6 +963,12 @@ struct btrfs_dev_replace_item {
 #define BTRFS_BLOCK_GROUP_RAID10	(1ULL << 6)
 #define BTRFS_BLOCK_GROUP_RAID5    (1 << 7)
 #define BTRFS_BLOCK_GROUP_RAID6    (1 << 8)
+/*
+ * New block groups for use with BTRFS hot relocation feature.
+ * When BTRFS hot relocation is enabled, *_NONROT block group is
+ * forced to nonrotating drives.
+ */
+#define BTRFS_BLOCK_GROUP_DATA_NONROT	(1ULL << 9)
 #define BTRFS_BLOCK_GROUP_RESERVED	BTRFS_AVAIL_ALLOC_BIT_SINGLE
 
 enum btrfs_raid_types {
@@ -978,7 +984,8 @@ enum btrfs_raid_types {
 
 #define BTRFS_BLOCK_GROUP_TYPE_MASK	(BTRFS_BLOCK_GROUP_DATA |    \
 					 BTRFS_BLOCK_GROUP_SYSTEM |  \
-					 BTRFS_BLOCK_GROUP_METADATA)
+					 BTRFS_BLOCK_GROUP_METADATA | \
+					 BTRFS_BLOCK_GROUP_DATA_NONROT)
 
 #define BTRFS_BLOCK_GROUP_PROFILE_MASK	(BTRFS_BLOCK_GROUP_RAID0 |   \
 					 BTRFS_BLOCK_GROUP_RAID1 |   \
@@ -1521,6 +1528,7 @@ struct btrfs_fs_info {
 	struct list_head space_info;
 
 	struct btrfs_space_info *data_sinfo;
+	struct btrfs_space_info *nonrot_data_sinfo;
 
 	struct reloc_control *reloc_ctl;
 
@@ -1545,6 +1553,7 @@ struct btrfs_fs_info {
 	u64 avail_data_alloc_bits;
 	u64 avail_metadata_alloc_bits;
 	u64 avail_system_alloc_bits;
+	u64 avail_data_nonrot_alloc_bits;
 
 	/* restriper state */
 	spinlock_t balance_lock;
@@ -1557,6 +1566,7 @@ struct btrfs_fs_info {
 
 	unsigned data_chunk_allocations;
 	unsigned metadata_ratio;
+	unsigned data_nonrot_chunk_allocations;
 
 	void *bdev_holder;
 
@@ -1928,6 +1938,7 @@ struct btrfs_ioctl_defrag_range_args {
 #define BTRFS_MOUNT_CHECK_INTEGRITY_INCLUDING_EXTENT_DATA (1 << 21)
 #define BTRFS_MOUNT_PANIC_ON_FATAL_ERROR	(1 << 22)
 #define BTRFS_MOUNT_HOT_TRACK		(1 << 23)
+#define BTRFS_MOUNT_HOT_MOVE		(1 << 24)
 
 #define btrfs_clear_opt(o, opt)		((o) &= ~BTRFS_MOUNT_##opt)
 #define btrfs_set_opt(o, opt)		((o) |= BTRFS_MOUNT_##opt)
@@ -3043,6 +3054,8 @@ int btrfs_pin_extent_for_log_replay(struct btrfs_root *root,
 int btrfs_cross_ref_exist(struct btrfs_trans_handle *trans,
 			  struct btrfs_root *root,
 			  u64 objectid, u64 offset, u64 bytenr);
+struct btrfs_block_group_cache *btrfs_lookup_first_block_group(
+				struct btrfs_fs_info *info, u64 bytenr);
 struct btrfs_block_group_cache *btrfs_lookup_block_group(
 						 struct btrfs_fs_info *info,
 						 u64 bytenr);
@@ -3093,6 +3106,8 @@ int btrfs_inc_extent_ref(struct btrfs_trans_handle *trans,
 			 struct btrfs_root *root,
 			 u64 bytenr, u64 num_bytes, u64 parent,
 			 u64 root_objectid, u64 owner, u64 offset, int for_cow);
+struct btrfs_block_group_cache *next_block_group(struct btrfs_root *root,
+			 struct btrfs_block_group_cache *cache);
 
 int btrfs_write_dirty_block_groups(struct btrfs_trans_handle *trans,
 				    struct btrfs_root *root);
@@ -3122,8 +3137,14 @@ enum btrfs_reserve_flush_enum {
 	BTRFS_RESERVE_FLUSH_ALL,
 };
 
-int btrfs_check_data_free_space(struct inode *inode, u64 bytes);
-void btrfs_free_reserved_data_space(struct inode *inode, u64 bytes);
+enum {
+	TYPE_ROT = 0,	/* rot -> rotating */
+	TYPE_NONROT,	/* nonrot -> nonrotating */
+	MAX_RELOC_TYPES,
+};
+
+int btrfs_check_data_free_space(struct inode *inode, u64 bytes, int *flag);
+void btrfs_free_reserved_data_space(struct inode *inode, u64 bytes, int flag);
 void btrfs_trans_release_metadata(struct btrfs_trans_handle *trans,
 				struct btrfs_root *root);
 int btrfs_orphan_reserve_metadata(struct btrfs_trans_handle *trans,
@@ -3138,8 +3159,8 @@ void btrfs_subvolume_release_metadata(struct btrfs_root *root,
 				      u64 qgroup_reserved);
 int btrfs_delalloc_reserve_metadata(struct inode *inode, u64 num_bytes);
 void btrfs_delalloc_release_metadata(struct inode *inode, u64 num_bytes);
-int btrfs_delalloc_reserve_space(struct inode *inode, u64 num_bytes);
-void btrfs_delalloc_release_space(struct inode *inode, u64 num_bytes);
+int btrfs_delalloc_reserve_space(struct inode *inode, u64 num_bytes, int *flag);
+void btrfs_delalloc_release_space(struct inode *inode, u64 num_bytes, int flag);
 void btrfs_init_block_rsv(struct btrfs_block_rsv *rsv, unsigned short type);
 struct btrfs_block_rsv *btrfs_alloc_block_rsv(struct btrfs_root *root,
 					      unsigned short type);
@@ -3612,7 +3633,7 @@ int btrfs_release_file(struct inode *inode, struct file *file);
 int btrfs_dirty_pages(struct btrfs_root *root, struct inode *inode,
 		      struct page **pages, size_t num_pages,
 		      loff_t pos, size_t write_bytes,
-		      struct extent_state **cached);
+		      struct extent_state **cached, int flag);
 
 /* tree-defrag.c */
 int btrfs_defrag_leaves(struct btrfs_trans_handle *trans,

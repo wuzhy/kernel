@@ -1229,6 +1229,26 @@ int clear_extent_uptodate(struct extent_io_tree *tree, u64 start, u64 end,
 				cached_state, mask);
 }
 
+void set_extent_hot(struct inode *inode, u64 start, u64 end,
+			struct extent_state **cached_state,
+			int type, int flag)
+{
+	int bits = (type == TYPE_NONROT) ? EXTENT_HOT : EXTENT_COLD;
+
+	if (flag) {
+		bits |= EXTENT_DELALLOC | EXTENT_UPTODATE;
+
+		clear_extent_bit(&BTRFS_I(inode)->io_tree, start, end,
+				EXTENT_DIRTY | EXTENT_DELALLOC |
+				EXTENT_DO_ACCOUNTING |
+				EXTENT_HOT | EXTENT_COLD,
+				0, 0, cached_state, GFP_NOFS);
+	}
+
+	set_extent_bit(&BTRFS_I(inode)->io_tree, start,
+			end, bits, NULL, cached_state, GFP_NOFS);
+}
+
 /*
  * either insert or lock state struct between start and end use mask to tell
  * us if waiting is desired.
@@ -1430,9 +1450,11 @@ static noinline u64 find_delalloc_range(struct extent_io_tree *tree,
 {
 	struct rb_node *node;
 	struct extent_state *state;
+	struct btrfs_root *root;
 	u64 cur_start = *start;
 	u64 found = 0;
 	u64 total_bytes = 0;
+	int flag = EXTENT_DELALLOC;
 
 	spin_lock(&tree->lock);
 
@@ -1447,13 +1469,27 @@ static noinline u64 find_delalloc_range(struct extent_io_tree *tree,
 		goto out;
 	}
 
+	root = BTRFS_I(tree->mapping->host)->root;
 	while (1) {
 		state = rb_entry(node, struct extent_state, rb_node);
 		if (found && (state->start != cur_start ||
 			      (state->state & EXTENT_BOUNDARY))) {
 			goto out;
 		}
-		if (!(state->state & EXTENT_DELALLOC)) {
+		if (btrfs_test_opt(root, HOT_MOVE)) {
+			if (!(state->state & EXTENT_DELALLOC) ||
+				(!(state->state & EXTENT_HOT) &&
+				!(state->state & EXTENT_COLD))) {
+				if (!found)
+					*end = state->end;
+				goto out;
+			} else {
+				if (!found)
+					flag = (state->state & EXTENT_HOT) ?
+						EXTENT_HOT : EXTENT_COLD;
+			}
+		}
+		if (!(state->state & flag)) {
 			if (!found)
 				*end = state->end;
 			goto out;
@@ -1640,7 +1676,13 @@ again:
 	lock_extent_bits(tree, delalloc_start, delalloc_end, 0, &cached_state);
 
 	/* then test to make sure it is all still delalloc */
-	ret = test_range_bit(tree, delalloc_start, delalloc_end,
+	if (btrfs_test_opt(BTRFS_I(inode)->root, HOT_MOVE)) {
+		ret = test_range_bit(tree, delalloc_start, delalloc_end,
+			     EXTENT_DELALLOC | EXTENT_HOT, 1, cached_state) ||
+			test_range_bit(tree, delalloc_start, delalloc_end,
+			     EXTENT_DELALLOC | EXTENT_COLD, 1, cached_state);
+	} else
+		ret = test_range_bit(tree, delalloc_start, delalloc_end,
 			     EXTENT_DELALLOC, 1, cached_state);
 	if (!ret) {
 		unlock_extent_cached(tree, delalloc_start, delalloc_end,
@@ -1677,6 +1719,11 @@ int extent_clear_unlock_delalloc(struct inode *inode,
 
 	if (op & EXTENT_CLEAR_DELALLOC)
 		clear_bits |= EXTENT_DELALLOC;
+
+	if (op & EXTENT_CLEAR_HOT)
+		clear_bits |= EXTENT_HOT;
+	if (op & EXTENT_CLEAR_COLD)
+		clear_bits |= EXTENT_COLD;
 
 	clear_extent_bit(tree, start, end, clear_bits, 1, 0, NULL, GFP_NOFS);
 	if (!(op & (EXTENT_CLEAR_UNLOCK_PAGE | EXTENT_CLEAR_DIRTY |

@@ -19,6 +19,8 @@
 #define EXTENT_FIRST_DELALLOC (1 << 12)
 #define EXTENT_NEED_WAIT (1 << 13)
 #define EXTENT_DAMAGED (1 << 14)
+#define EXTENT_HOT (1 << 15)
+#define EXTENT_COLD (1 << 16)
 #define EXTENT_IOBITS (EXTENT_LOCKED | EXTENT_WRITEBACK)
 #define EXTENT_CTLBITS (EXTENT_DO_ACCOUNTING | EXTENT_FIRST_DELALLOC)
 
@@ -51,6 +53,8 @@
 #define EXTENT_END_WRITEBACK	 0x20
 #define EXTENT_SET_PRIVATE2	 0x40
 #define EXTENT_CLEAR_ACCOUNTING  0x80
+#define EXTENT_CLEAR_HOT	 0x100
+#define EXTENT_CLEAR_COLD	 0x200
 
 /*
  * page->private values.  Every page that is controlled by the extent
@@ -237,6 +241,9 @@ int set_extent_delalloc(struct extent_io_tree *tree, u64 start, u64 end,
 			struct extent_state **cached_state, gfp_t mask);
 int set_extent_defrag(struct extent_io_tree *tree, u64 start, u64 end,
 		      struct extent_state **cached_state, gfp_t mask);
+void set_extent_hot(struct inode *inode, u64 start, u64 end,
+			struct extent_state **cached_state,
+			int type, int flag);
 int find_first_extent_bit(struct extent_io_tree *tree, u64 start,
 			  u64 *start_ret, u64 *end_ret, unsigned long bits,
 			  struct extent_state **cached_state);

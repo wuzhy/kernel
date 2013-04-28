@@ -31,6 +31,7 @@
 #include "async-thread.h"
 #include "free-space-cache.h"
 #include "inode-map.h"
+#include "hot_relocate.h"
 
 /*
  * backref_node, mapping_node and tree_block start with this
@@ -2938,12 +2939,13 @@ int prealloc_file_extent_cluster(struct inode *inode,
 	u64 num_bytes;
 	int nr = 0;
 	int ret = 0;
+	int flag = TYPE_ROT;
 
 	BUG_ON(cluster->start != cluster->boundary[0]);
 	mutex_lock(&inode->i_mutex);
 
 	ret = btrfs_check_data_free_space(inode, cluster->end +
-					  1 - cluster->start);
+					  1 - cluster->start, &flag);
 	if (ret)
 		goto out;
 
@@ -2965,7 +2967,7 @@ int prealloc_file_extent_cluster(struct inode *inode,
 		nr++;
 	}
 	btrfs_free_reserved_data_space(inode, cluster->end +
-				       1 - cluster->start);
+				       1 - cluster->start, flag);
 out:
 	mutex_unlock(&inode->i_mutex);
 	return ret;

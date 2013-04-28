@@ -57,6 +57,7 @@
 #include "free-space-cache.h"
 #include "inode-map.h"
 #include "backref.h"
+#include "hot_relocate.h"
 
 struct btrfs_iget_args {
 	u64 ino;
@@ -105,6 +106,27 @@ static struct extent_map *create_pinned_em(struct inode *inode, u64 start,
 					   int type);
 
 static int btrfs_dirty_inode(struct inode *inode);
+
+static int get_chunk_type(struct inode *inode, u64 start, u64 end)
+{
+	int hot, cold, ret = 1;
+
+	hot = test_range_bit(&BTRFS_I(inode)->io_tree,
+				start, end, EXTENT_HOT, 1, NULL);
+	cold = test_range_bit(&BTRFS_I(inode)->io_tree,
+				start, end, EXTENT_COLD, 1, NULL);
+
+	WARN_ON(hot && cold);
+
+	if (hot)
+		ret = 2;
+	else if (cold)
+		ret = 1;
+	else
+		WARN_ON(1);
+
+	return ret;
+}
 
 static int btrfs_init_inode_security(struct btrfs_trans_handle *trans,
 				     struct inode *inode,  struct inode *dir,
@@ -861,13 +883,14 @@ static noinline int __cow_file_range(struct btrfs_trans_handle *trans,
 {
 	u64 alloc_hint = 0;
 	u64 num_bytes;
-	unsigned long ram_size;
+	unsigned long ram_size, hot_flag = 0;
 	u64 disk_num_bytes;
 	u64 cur_alloc_size;
 	u64 blocksize = root->sectorsize;
 	struct btrfs_key ins;
 	struct extent_map *em;
 	struct extent_map_tree *em_tree = &BTRFS_I(inode)->extent_tree;
+	int chunk_type = 1;
 	int ret = 0;
 
 	BUG_ON(btrfs_is_free_space_inode(inode));
@@ -875,6 +898,7 @@ static noinline int __cow_file_range(struct btrfs_trans_handle *trans,
 	num_bytes = ALIGN(end - start + 1, blocksize);
 	num_bytes = max(blocksize,  num_bytes);
 	disk_num_bytes = num_bytes;
+	ret = 0;
 
 	/* if this is a small write inside eof, kick off defrag */
 	if (num_bytes < 64 * 1024 &&
@@ -894,7 +918,8 @@ static noinline int __cow_file_range(struct btrfs_trans_handle *trans,
 				     EXTENT_CLEAR_DELALLOC |
 				     EXTENT_CLEAR_DIRTY |
 				     EXTENT_SET_WRITEBACK |
-				     EXTENT_END_WRITEBACK);
+				     EXTENT_END_WRITEBACK |
+				     hot_flag);
 
 			*nr_written = *nr_written +
 			     (end - start + PAGE_CACHE_SIZE) / PAGE_CACHE_SIZE;
@@ -916,9 +941,25 @@ static noinline int __cow_file_range(struct btrfs_trans_handle *trans,
 		unsigned long op;
 
 		cur_alloc_size = disk_num_bytes;
+
+		/*
+		 * Use COW operations to move hot data to SSD and cold data
+		 * back to rotating disk. Sets chunk_type to 1 to indicate
+		 * to write to BTRFS_BLOCK_GROUP_DATA or 2 to indicate
+		 * BTRFS_BLOCK_GROUP_DATA_NONROT.
+		 */
+		if (btrfs_test_opt(root, HOT_MOVE)) {
+			chunk_type = get_chunk_type(inode, start,
+						start + cur_alloc_size - 1);
+			if (chunk_type == 2)
+				hot_flag = EXTENT_CLEAR_HOT;
+			else
+				hot_flag = EXTENT_CLEAR_COLD;
+		}
+
 		ret = btrfs_reserve_extent(trans, root, cur_alloc_size,
 					   root->sectorsize, 0, alloc_hint,
-					   &ins, 1);
+					   &ins, chunk_type);
 		if (ret < 0) {
 			btrfs_abort_transaction(trans, root, ret);
 			goto out_unlock;
@@ -986,7 +1027,7 @@ static noinline int __cow_file_range(struct btrfs_trans_handle *trans,
 		 */
 		op = unlock ? EXTENT_CLEAR_UNLOCK_PAGE : 0;
 		op |= EXTENT_CLEAR_UNLOCK | EXTENT_CLEAR_DELALLOC |
-			EXTENT_SET_PRIVATE2;
+			EXTENT_SET_PRIVATE2 | hot_flag;
 
 		extent_clear_unlock_delalloc(inode, &BTRFS_I(inode)->io_tree,
 					     start, start + ram_size - 1,
@@ -1010,7 +1051,8 @@ out_unlock:
 		     EXTENT_CLEAR_DELALLOC |
 		     EXTENT_CLEAR_DIRTY |
 		     EXTENT_SET_WRITEBACK |
-		     EXTENT_END_WRITEBACK);
+		     EXTENT_END_WRITEBACK |
+		     hot_flag);
 
 	goto out;
 }
@@ -1604,8 +1646,12 @@ static void btrfs_clear_bit_hook(struct inode *inode,
 			btrfs_delalloc_release_metadata(inode, len);
 
 		if (root->root_key.objectid != BTRFS_DATA_RELOC_TREE_OBJECTID
-		    && do_list)
-			btrfs_free_reserved_data_space(inode, len);
+		    && do_list) {
+			int flag = TYPE_ROT;
+			if ((state->state & EXTENT_HOT) && (*bits & EXTENT_HOT))
+				flag = TYPE_NONROT;
+			btrfs_free_reserved_data_space(inode, len, flag);
+		}
 
 		__percpu_counter_add(&root->fs_info->delalloc_bytes, -len,
 				     root->fs_info->delalloc_batch);
@@ -1800,6 +1846,7 @@ static void btrfs_writepage_fixup_worker(struct btrfs_work *work)
 	u64 page_start;
 	u64 page_end;
 	int ret;
+	int flag = TYPE_ROT;
 
 	fixup = container_of(work, struct btrfs_writepage_fixup, work);
 	page = fixup->page;
@@ -1831,13 +1878,17 @@ again:
 		goto again;
 	}
 
-	ret = btrfs_delalloc_reserve_space(inode, PAGE_CACHE_SIZE);
+	ret = btrfs_delalloc_reserve_space(inode, PAGE_CACHE_SIZE, &flag);
 	if (ret) {
 		mapping_set_error(page->mapping, ret);
 		end_extent_writepage(page, ret, page_start, page_end);
 		ClearPageChecked(page);
 		goto out;
 	 }
+
+	if (btrfs_test_opt(BTRFS_I(inode)->root, HOT_MOVE))
+		set_extent_hot(inode, page_start, page_end,
+				&cached_state, flag, 0);
 
 	btrfs_set_extent_delalloc(inode, page_start, page_end, &cached_state);
 	ClearPageChecked(page);
@@ -4286,20 +4337,21 @@ int btrfs_truncate_page(struct inode *inode, loff_t from, loff_t len,
 	struct page *page;
 	gfp_t mask = btrfs_alloc_write_mask(mapping);
 	int ret = 0;
+	int flag = TYPE_ROT;
 	u64 page_start;
 	u64 page_end;
 
 	if ((offset & (blocksize - 1)) == 0 &&
 	    (!len || ((len & (blocksize - 1)) == 0)))
 		goto out;
-	ret = btrfs_delalloc_reserve_space(inode, PAGE_CACHE_SIZE);
+	ret = btrfs_delalloc_reserve_space(inode, PAGE_CACHE_SIZE, &flag);
 	if (ret)
 		goto out;
 
 again:
 	page = find_or_create_page(mapping, index, mask);
 	if (!page) {
-		btrfs_delalloc_release_space(inode, PAGE_CACHE_SIZE);
+		btrfs_delalloc_release_space(inode, PAGE_CACHE_SIZE, flag);
 		ret = -ENOMEM;
 		goto out;
 	}
@@ -4338,8 +4390,13 @@ again:
 
 	clear_extent_bit(&BTRFS_I(inode)->io_tree, page_start, page_end,
 			  EXTENT_DIRTY | EXTENT_DELALLOC |
-			  EXTENT_DO_ACCOUNTING | EXTENT_DEFRAG,
+			  EXTENT_DO_ACCOUNTING | EXTENT_DEFRAG |
+			  EXTENT_HOT | EXTENT_COLD,
 			  0, 0, &cached_state, GFP_NOFS);
+
+	if (btrfs_test_opt(root, HOT_MOVE))
+		set_extent_hot(inode, page_start, page_end,
+				&cached_state, flag, 0);
 
 	ret = btrfs_set_extent_delalloc(inode, page_start, page_end,
 					&cached_state);
@@ -4367,7 +4424,7 @@ again:
 
 out_unlock:
 	if (ret)
-		btrfs_delalloc_release_space(inode, PAGE_CACHE_SIZE);
+		btrfs_delalloc_release_space(inode, PAGE_CACHE_SIZE, flag);
 	unlock_page(page);
 	page_cache_release(page);
 out:
@@ -7379,6 +7436,7 @@ static ssize_t btrfs_direct_IO(int rw, struct kiocb *iocb,
 	struct inode *inode = file->f_mapping->host;
 	size_t count = 0;
 	int flags = 0;
+	int flag = TYPE_ROT;
 	bool wakeup = true;
 	bool relock = false;
 	ssize_t ret;
@@ -7401,7 +7459,7 @@ static ssize_t btrfs_direct_IO(int rw, struct kiocb *iocb,
 			mutex_unlock(&inode->i_mutex);
 			relock = true;
 		}
-		ret = btrfs_delalloc_reserve_space(inode, count);
+		ret = btrfs_delalloc_reserve_space(inode, count, &flag);
 		if (ret)
 			goto out;
 	} else if (unlikely(test_bit(BTRFS_INODE_READDIO_NEED_LOCK,
@@ -7417,10 +7475,10 @@ static ssize_t btrfs_direct_IO(int rw, struct kiocb *iocb,
 			btrfs_submit_direct, flags);
 	if (rw & WRITE) {
 		if (ret < 0 && ret != -EIOCBQUEUED)
-			btrfs_delalloc_release_space(inode, count);
+			btrfs_delalloc_release_space(inode, count, flag);
 		else if (ret >= 0 && (size_t)ret < count)
 			btrfs_delalloc_release_space(inode,
-						     count - (size_t)ret);
+						     count - (size_t)ret, flag);
 		else
 			btrfs_delalloc_release_metadata(inode, 0);
 	}
@@ -7543,7 +7601,8 @@ static void btrfs_invalidatepage(struct page *page, unsigned long offset)
 		clear_extent_bit(tree, page_start, page_end,
 				 EXTENT_DIRTY | EXTENT_DELALLOC |
 				 EXTENT_LOCKED | EXTENT_DO_ACCOUNTING |
-				 EXTENT_DEFRAG, 1, 0, &cached_state, GFP_NOFS);
+				 EXTENT_DEFRAG | EXTENT_HOT | EXTENT_COLD,
+				 1, 0, &cached_state, GFP_NOFS);
 		/*
 		 * whoever cleared the private bit is responsible
 		 * for the finish_ordered_io
@@ -7559,7 +7618,8 @@ static void btrfs_invalidatepage(struct page *page, unsigned long offset)
 	}
 	clear_extent_bit(tree, page_start, page_end,
 		 EXTENT_LOCKED | EXTENT_DIRTY | EXTENT_DELALLOC |
-		 EXTENT_DO_ACCOUNTING | EXTENT_DEFRAG, 1, 1,
+		 EXTENT_DO_ACCOUNTING | EXTENT_DEFRAG |
+		 EXTENT_HOT | EXTENT_COLD, 1, 1,
 		 &cached_state, GFP_NOFS);
 	__btrfs_releasepage(page, GFP_NOFS);
 
@@ -7599,11 +7659,12 @@ int btrfs_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf)
 	loff_t size;
 	int ret;
 	int reserved = 0;
+	int flag = TYPE_ROT;
 	u64 page_start;
 	u64 page_end;
 
 	sb_start_pagefault(inode->i_sb);
-	ret  = btrfs_delalloc_reserve_space(inode, PAGE_CACHE_SIZE);
+	ret  = btrfs_delalloc_reserve_space(inode, PAGE_CACHE_SIZE, &flag);
 	if (!ret) {
 		ret = file_update_time(vma->vm_file);
 		reserved = 1;
@@ -7658,8 +7719,13 @@ again:
 	 */
 	clear_extent_bit(&BTRFS_I(inode)->io_tree, page_start, page_end,
 			  EXTENT_DIRTY | EXTENT_DELALLOC |
-			  EXTENT_DO_ACCOUNTING | EXTENT_DEFRAG,
+			  EXTENT_DO_ACCOUNTING | EXTENT_DEFRAG |
+			  EXTENT_HOT | EXTENT_COLD,
 			  0, 0, &cached_state, GFP_NOFS);
+
+	if (btrfs_test_opt(root, HOT_MOVE))
+		set_extent_hot(inode, page_start, page_end,
+				&cached_state, flag, 0);
 
 	ret = btrfs_set_extent_delalloc(inode, page_start, page_end,
 					&cached_state);
@@ -7700,7 +7766,7 @@ out_unlock:
 	}
 	unlock_page(page);
 out:
-	btrfs_delalloc_release_space(inode, PAGE_CACHE_SIZE);
+	btrfs_delalloc_release_space(inode, PAGE_CACHE_SIZE, flag);
 out_noreserve:
 	sb_end_pagefault(inode->i_sb);
 	return ret;

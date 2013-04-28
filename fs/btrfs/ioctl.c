@@ -56,6 +56,7 @@
 #include "rcu-string.h"
 #include "send.h"
 #include "dev-replace.h"
+#include "hot_relocate.h"
 
 /* Mask out flags that are inappropriate for the given type of inode. */
 static inline __u32 btrfs_mask_flags(umode_t mode, __u32 flags)
@@ -1001,6 +1002,7 @@ static int cluster_pages_for_defrag(struct inode *inode,
 	int ret;
 	int i;
 	int i_done;
+	int flag = TYPE_ROT;
 	struct btrfs_ordered_extent *ordered;
 	struct extent_state *cached_state = NULL;
 	struct extent_io_tree *tree;
@@ -1013,7 +1015,7 @@ static int cluster_pages_for_defrag(struct inode *inode,
 	page_cnt = min_t(u64, (u64)num_pages, (u64)file_end - start_index + 1);
 
 	ret = btrfs_delalloc_reserve_space(inode,
-					   page_cnt << PAGE_CACHE_SHIFT);
+					   page_cnt << PAGE_CACHE_SHIFT, &flag);
 	if (ret)
 		return ret;
 	i_done = 0;
@@ -1101,9 +1103,12 @@ again:
 		BTRFS_I(inode)->outstanding_extents++;
 		spin_unlock(&BTRFS_I(inode)->lock);
 		btrfs_delalloc_release_space(inode,
-				     (page_cnt - i_done) << PAGE_CACHE_SHIFT);
+			     (page_cnt - i_done) << PAGE_CACHE_SHIFT, flag);
 	}
 
+	if (btrfs_test_opt(BTRFS_I(inode)->root, HOT_MOVE))
+		set_extent_hot(inode, page_start, page_end - 1,
+				&cached_state, flag, 0);
 
 	set_extent_defrag(&BTRFS_I(inode)->io_tree, page_start, page_end - 1,
 			  &cached_state, GFP_NOFS);
@@ -1126,7 +1131,8 @@ out:
 		unlock_page(pages[i]);
 		page_cache_release(pages[i]);
 	}
-	btrfs_delalloc_release_space(inode, page_cnt << PAGE_CACHE_SHIFT);
+	btrfs_delalloc_release_space(inode,
+				page_cnt << PAGE_CACHE_SHIFT, flag);
 	return ret;
 
 }
@@ -3021,8 +3027,9 @@ static long btrfs_ioctl_space_info(struct btrfs_root *root, void __user *arg)
 	u64 types[] = {BTRFS_BLOCK_GROUP_DATA,
 		       BTRFS_BLOCK_GROUP_SYSTEM,
 		       BTRFS_BLOCK_GROUP_METADATA,
-		       BTRFS_BLOCK_GROUP_DATA | BTRFS_BLOCK_GROUP_METADATA};
-	int num_types = 4;
+		       BTRFS_BLOCK_GROUP_DATA | BTRFS_BLOCK_GROUP_METADATA,
+		       BTRFS_BLOCK_GROUP_DATA_NONROT};
+	int num_types = 5;
 	int alloc_size;
 	int ret = 0;
 	u64 slot_count = 0;
