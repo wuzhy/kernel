@@ -1636,6 +1636,8 @@ struct btrfs_fs_info {
 	struct btrfs_dev_replace dev_replace;
 
 	atomic_t mutually_exclusive_operation_running;
+
+	void *hot_reloc;
 };
 
 /*
