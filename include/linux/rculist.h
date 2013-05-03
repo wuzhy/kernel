@@ -218,6 +218,11 @@ static inline void list_splice_init_rcu(struct list_head *list,
 	at->prev = last;
 }
 
+#define __list_for_each_rcu(pos, head)				\
+	for (pos = rcu_dereference(list_next_rcu(head));	\
+	     pos != head;						\
+	     pos = rcu_dereference(list_next_rcu(pos)))
+
 /**
  * list_entry_rcu - get the struct for this entry
  * @ptr:        the &struct list_head pointer.
