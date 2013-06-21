@@ -16,6 +16,7 @@
 #define _LINUX_HOTTRACK_H
 
 #include <linux/types.h>
+#include <linux/percpu_counter.h>
 
 struct hot_heat_info {
 	__u64 avg_delta_reads;
@@ -108,10 +109,15 @@ struct hot_info {
 	struct shrinker hot_shrink;
 	struct dentry *debugfs_dentry;
 	atomic_t run_debugfs;
+
+	struct percpu_counter   mem ____cacheline_aligned_in_smp;
 };
 
 /* set how often to update temperatures (seconds) */
 extern int sysctl_hot_update_interval;
+/* note: sysctl_** is in the unit of 1M bytes */
+extern int sysctl_hot_mem_high_thresh;
+extern int sysctl_hot_mem_low_thresh;
 
 /*
  * Hot data tracking ioctls:

@@ -1617,6 +1617,20 @@ static struct ctl_table fs_table[] = {
 		.extra1		= &pipe_min_size,
 	},
 	{
+		.procname       = "hot-mem-high-thresh",
+		.data           = &sysctl_hot_mem_high_thresh,
+		.maxlen         = sizeof(int),
+		.mode           = 0644,
+		.proc_handler   = proc_dointvec,
+	},
+	{
+		.procname       = "hot-mem-low-thresh",
+		.data           = &sysctl_hot_mem_low_thresh,
+		.maxlen         = sizeof(int),
+		.mode           = 0644,
+		.proc_handler   = proc_dointvec,
+	},
+	{
 		.procname	= "hot-update-interval",
 		.data		= &sysctl_hot_update_interval,
 		.maxlen		= sizeof(int),

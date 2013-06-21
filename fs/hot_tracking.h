@@ -45,4 +45,30 @@ struct hot_debugfs {
 	const struct file_operations *fops;
 };
 
+/* Memory Tracking Functions. */
+static inline unsigned long hot_mem_limit(struct hot_info *root)
+{
+	return percpu_counter_read(&root->mem);
+}
+
+static inline void hot_mem_limit_sub(struct hot_info *root, int i)
+{
+	percpu_counter_add(&root->mem, -i);
+}
+
+static inline void hot_mem_limit_add(struct hot_info *root, int i)
+{
+	percpu_counter_add(&root->mem, i);
+}
+
+static inline void hot_mem_limit_init(struct hot_info *root)
+{
+	percpu_counter_init(&root->mem, 0);
+}
+
+static inline void hot_mem_limit_exit(struct hot_info *root)
+{
+	percpu_counter_destroy(&root->mem);
+}
+
 #endif /* __HOT_TRACKING__ */

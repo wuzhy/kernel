@@ -23,6 +23,12 @@
 
 static struct dentry *hot_debugfs_root;
 
+int sysctl_hot_mem_high_thresh __read_mostly = 0;
+EXPORT_SYMBOL_GPL(sysctl_hot_mem_high_thresh);
+
+int sysctl_hot_mem_low_thresh __read_mostly = 0;
+EXPORT_SYMBOL_GPL(sysctl_hot_mem_low_thresh);
+
 int sysctl_hot_update_interval __read_mostly = 300;
 EXPORT_SYMBOL_GPL(sysctl_hot_update_interval);
 
@@ -122,10 +128,14 @@ static void hot_comm_item_unlink(struct hot_info *root,
 			spin_lock(&he->i_lock);
 			rb_erase(&ci->rb_node, &he->hot_range_tree);
 			spin_unlock(&he->i_lock);
+
+			hot_mem_limit_sub(root, sizeof(struct hot_range_item));
 		} else {
 			spin_lock(&root->t_lock);
 			rb_erase(&ci->rb_node, &root->hot_inode_tree);
 			spin_unlock(&root->t_lock);
+
+			hot_mem_limit_sub(root, sizeof(struct hot_inode_item));
 		}
 
 		hot_comm_item_put(ci);
@@ -199,13 +209,15 @@ redo:
 		else {
 			hot_comm_item_get(&he->hot_inode);
 			spin_unlock(&root->t_lock);
-			if (he_new)
+			if (he_new) {
 				/*
 				 * Lost the race. Somebody else inserted
 				 * the item for the inode. Free the
 				 * newly allocated item.
 				 */
 				kmem_cache_free(hot_inode_item_cachep, he_new);
+				hot_mem_limit_sub(root, sizeof(struct hot_inode_item));
+			}
 
 			if (test_bit(HOT_DELETING, &he->hot_inode.delete_flag))
 				return ERR_PTR(-ENOENT);
@@ -231,6 +243,7 @@ redo:
 	if (!he_new)
 		return ERR_PTR(-ENOMEM);
 
+	hot_mem_limit_add(root, sizeof(struct hot_inode_item));
 	hot_inode_item_init(he_new, root, ino);
 
 	goto redo;
@@ -280,13 +293,15 @@ redo:
 		else {
 			hot_comm_item_get(&hr->hot_range);
 			spin_unlock(&he->i_lock);
-			if(hr_new)
+			if(hr_new) {
 				/*
 				 * Lost the race. Somebody else inserted
 				 * the item for the range. Free the
 				 * newly allocated item.
 				 */
 				kmem_cache_free(hot_range_item_cachep, hr_new);
+				hot_mem_limit_sub(root, sizeof(struct hot_range_item));
+			}
 
 			if (test_bit(HOT_DELETING, &hr->hot_range.delete_flag))
 				return ERR_PTR(-ENOENT);
@@ -312,6 +327,7 @@ redo:
 	if (!hr_new)
 		return ERR_PTR(-ENOMEM);
 
+	hot_mem_limit_add(root, sizeof(struct hot_range_item));
 	hot_range_item_init(hr_new, he, start);
 
 	goto redo;
@@ -570,6 +586,22 @@ static void hot_item_evictor(struct hot_info *root, unsigned long work,
 	}
 }
 
+static void hot_mem_evictor(struct hot_info *root)
+{
+	unsigned long work;
+
+	if (sysctl_hot_mem_high_thresh == 0)
+		return;
+
+	/* note: sysctl_** is in the unit of 1M bytes */
+	if (hot_mem_limit(root) <= sysctl_hot_mem_high_thresh * 1024 * 1024)
+		return;
+
+	work = hot_mem_limit(root) - sysctl_hot_mem_low_thresh * 1024 * 1024;
+
+	hot_item_evictor(root, work, hot_mem_limit);
+}
+
 /*
  * Every sync period we update temperatures for
  * each hot inode item and hot range item for aging
@@ -583,6 +615,8 @@ static void hot_update_worker(struct work_struct *work)
 	struct hot_comm_item *ci;
 	struct hot_inode_item *he;
 	int i, j;
+
+	hot_mem_evictor(root);
 
 	rcu_read_lock();
 	node = rb_first(&root->hot_inode_tree);
@@ -1235,6 +1269,7 @@ int hot_track_init(struct super_block *sb)
 	if (IS_ERR(root))
 		return PTR_ERR(root);
 
+	hot_mem_limit_init(root);
 	sb->s_hot_root = root;
 
 	ret = hot_debugfs_init(sb);
@@ -1264,6 +1299,7 @@ void hot_track_exit(struct super_block *sb)
 {
 	struct hot_info *root = sb->s_hot_root;
 
+	hot_mem_limit_exit(root);
 	hot_debugfs_exit(sb);
 	hot_tree_exit(root);
 	sb->s_hot_root = NULL;
