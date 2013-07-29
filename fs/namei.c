@@ -38,6 +38,7 @@
 
 #include "internal.h"
 #include "mount.h"
+#include "hot_tracking.h"
 
 /* [Feb-1997 T. Schoebel-Theuer]
  * Fundamental changes in the pathname lookup mechanisms (namei)
@@ -3668,6 +3669,9 @@ int vfs_unlink(struct inode *dir, struct dentry *dentry)
 				dont_mount(dentry);
 		}
 	}
+
+	if (!error && !dentry->d_inode->i_nlink)
+		hot_inode_item_unlink(dentry->d_inode);
 	mutex_unlock(&dentry->d_inode->i_mutex);
 
 	/* We don't d_delete() NFS sillyrenamed files--they still exist. */

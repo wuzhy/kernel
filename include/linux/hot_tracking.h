@@ -31,8 +31,24 @@ enum {
 	MAX_TYPES,
 };
 
+/*
+ * A frequency data struct holds values that are used to
+ * determine temperature of files and file ranges. These structs
+ * are members of hot_inode_item and hot_range_item
+ */
+struct hot_freq {
+	struct timespec last_read_time;
+	struct timespec last_write_time;
+	u32 nr_reads;
+	u32 nr_writes;
+	u64 avg_delta_reads;
+	u64 avg_delta_writes;
+	u32 last_temp;
+};
+
 /* An item representing an inode and its access frequency */
 struct hot_inode_item {
+	struct hot_freq freq;           /* frequency data */
 	struct kref refs;
 	struct rb_node rb_node;         /* rbtree index */
 	struct rcu_head rcu;
@@ -47,6 +63,7 @@ struct hot_inode_item {
  * an inode whose frequency is being tracked
  */
 struct hot_range_item {
+	struct hot_freq freq;                   /* frequency data */
 	struct kref refs;
 	struct rb_node rb_node;                 /* rbtree index */
 	struct rcu_head rcu;
@@ -62,5 +79,7 @@ struct hot_info {
 
 extern int hot_track_init(struct super_block *sb);
 extern void hot_track_exit(struct super_block *sb);
+extern void hot_freqs_update(struct inode *inode, loff_t start,
+			size_t len, int rw);
 
 #endif  /* _LINUX_HOTTRACK_H */

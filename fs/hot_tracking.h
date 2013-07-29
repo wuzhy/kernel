@@ -16,8 +16,11 @@
 
 /* size of sub-file ranges */
 #define RANGE_BITS 20
+#define FREQ_POWER 4
 
 void __init hot_cache_init(void);
 void hot_inode_item_put(struct hot_inode_item *he);
+struct hot_inode_item *hot_inode_item_lookup(struct hot_info *root, u64 ino);
+void hot_inode_item_unlink(struct inode *inode);
 
 #endif /* __HOT_TRACKING__ */
