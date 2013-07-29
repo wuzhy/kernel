@@ -15,11 +15,11 @@
 #ifndef _LINUX_HOTTRACK_H
 #define _LINUX_HOTTRACK_H
 
-#include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/rbtree.h>
 #include <linux/kref.h>
 #include <linux/fs.h>
+#include <uapi/linux/hot_tracking.h>
 
 #define MAP_BITS 8
 #define MAP_SIZE (1 << MAP_BITS)
@@ -84,6 +84,14 @@ struct hot_info {
 	struct delayed_work update_work;
 	struct shrinker hot_shrink;
 };
+
+/*
+ * Hot data tracking ioctls:
+ *
+ * HOT_INFO - retrieve info on frequency of access
+ */
+#define FS_IOC_GET_HEAT_INFO _IOR('f', 17, \
+			struct hot_heat_info)
 
 extern int hot_track_init(struct super_block *sb);
 extern void hot_track_exit(struct super_block *sb);
