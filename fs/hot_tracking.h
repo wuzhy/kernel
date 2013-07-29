@@ -15,8 +15,6 @@
 #include <linux/workqueue.h>
 #include <linux/hot_tracking.h>
 
-#define HOT_UPDATE_INTERVAL 150
-
 /* size of sub-file ranges */
 #define RANGE_BITS 20
 #define FREQ_POWER 4

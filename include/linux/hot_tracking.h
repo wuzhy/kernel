@@ -85,6 +85,9 @@ struct hot_info {
 	struct shrinker hot_shrink;
 };
 
+/* set how often to update temperatures (seconds) */
+extern int sysctl_hot_update_interval;
+
 /*
  * Hot data tracking ioctls:
  *
