@@ -46,4 +46,27 @@ struct hot_inode_item *hot_inode_item_lookup(struct hot_info *root, u64 ino);
 void hot_inode_item_unlink(struct inode *inode);
 u32 hot_temp_calc(struct hot_freq *freq);
 
+/* Memory Tracking Functions. */
+static inline unsigned long hot_mem_limit_sum(struct hot_info *root)
+{
+	return atomic_long_read(&root->mem);
+}
+
+static inline void hot_mem_limit_sub(struct hot_info *root,
+				unsigned long count)
+{
+	atomic_long_sub(count, &root->mem);
+}
+
+static inline void hot_mem_limit_add(struct hot_info *root,
+				unsigned long count)
+{
+	atomic_long_add(count, &root->mem);
+}
+
+static inline void hot_mem_limit_init(struct hot_info *root)
+{
+	atomic_long_set(&root->mem, 0);
+}
+
 #endif /* __HOT_TRACKING__ */

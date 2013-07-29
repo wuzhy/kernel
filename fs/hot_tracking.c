@@ -15,6 +15,7 @@
 #include <linux/sched.h>
 #include "hot_tracking.h"
 
+int sysctl_hot_mem_high_thresh __read_mostly = 0;
 int sysctl_hot_update_interval __read_mostly = 150;
 
 /* kmem_cache pointers for slab caches */
@@ -32,6 +33,7 @@ static void hot_range_item_init(struct hot_range_item *hr,
 	hr->len = 1 << RANGE_BITS;
 	hr->hot_inode = he;
 	atomic_long_inc(&he->hot_root->hot_cnt);
+	hot_mem_limit_add(he->hot_root, sizeof(struct hot_range_item));
 }
 
 static void hot_range_item_free_cb(struct rcu_head *head)
@@ -55,6 +57,7 @@ static void hot_range_item_free(struct kref *kref)
 	spin_unlock(&root->m_lock);
 
 	atomic_long_dec(&root->hot_cnt);
+	hot_mem_limit_sub(root, sizeof(struct hot_range_item));
 	call_rcu(&hr->rcu, hot_range_item_free_cb);
 }
 
@@ -103,6 +106,8 @@ redo:
 				 * newly allocated item.
 				 */
 				atomic_long_dec(&he->hot_root->hot_cnt);
+				hot_mem_limit_sub(he->hot_root,
+						sizeof(struct hot_range_item));
 				kmem_cache_free(hot_range_item_cachep, hr_new);
 			}
 			spin_unlock(&he->i_lock);
@@ -205,6 +210,7 @@ static void hot_inode_item_init(struct hot_inode_item *he,
 	he->hot_root = root;
 	spin_lock_init(&he->i_lock);
 	atomic_long_inc(&root->hot_cnt);
+	hot_mem_limit_add(root, sizeof(struct hot_inode_item));
 }
 
 static void hot_inode_item_free_cb(struct rcu_head *head)
@@ -226,6 +232,7 @@ static void hot_inode_item_free(struct kref *kref)
 	hot_range_tree_free(he);
 
 	atomic_long_dec(&he->hot_root->hot_cnt);
+	hot_mem_limit_sub(he->hot_root, sizeof(struct hot_inode_item));
 	call_rcu(&he->rcu, hot_inode_item_free_cb);
 }
 
@@ -272,6 +279,8 @@ redo:
 				 * newly allocated item.
 				 */
 				atomic_long_dec(&root->hot_cnt);
+				hot_mem_limit_sub(root,
+						sizeof(struct hot_inode_item));
 				kmem_cache_free(hot_inode_item_cachep, he_new);
 			}
 			spin_unlock(&root->t_lock);
@@ -534,6 +543,23 @@ static unsigned long hot_item_evict(struct hot_info *root, unsigned long work,
 	return freed;
 }
 
+static void hot_mem_evict(struct hot_info *root)
+{
+	unsigned long sum, thresh;
+
+	if (sysctl_hot_mem_high_thresh == 0) 
+		return;
+
+	sum = hot_mem_limit_sum(root);
+	/* Note: sysctl_** is in the unit of 1M bytes */
+	thresh = sysctl_hot_mem_high_thresh;
+	thresh *= 1024 * 1024;
+	if (sum <= thresh)
+		return;
+
+	hot_item_evict(root, sum - thresh, hot_mem_limit_sum);
+}
+
 /*
  * Every sync period we update temperatures for
  * each hot inode item and hot range item for aging
@@ -545,6 +571,8 @@ static void hot_update_worker(struct work_struct *work)
 					struct hot_info, update_work);
 	struct hot_inode_item *he;
 	struct rb_node *node;
+
+	hot_mem_evict(root);
 
 	rcu_read_lock();
 	node = root->hot_inode_tree.rb_node;
@@ -753,6 +781,7 @@ int hot_track_init(struct super_block *sb)
 		goto err;
 	}
 
+	hot_mem_limit_init(root);
 	sb->s_hot_root = root;
 	sb->s_flags |= MS_HOTTRACK;
 

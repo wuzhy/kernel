@@ -83,10 +83,13 @@ struct hot_info {
 	struct workqueue_struct *update_wq;
 	struct delayed_work update_work;
 	struct shrinker hot_shrink;
+	atomic_long_t mem;
 };
 
 /* set how often to update temperatures (seconds) */
 extern int sysctl_hot_update_interval;
+/* note: sysctl_** is in the unit of 1M bytes */
+extern int sysctl_hot_mem_high_thresh;
 
 /*
  * Hot data tracking ioctls:
