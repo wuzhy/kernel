@@ -79,8 +79,10 @@ struct hot_info {
 	struct list_head hot_map[MAX_TYPES][MAP_SIZE];	/* map of inode temp */
 	spinlock_t t_lock;		/* protect tree and map for inode item */
 	spinlock_t m_lock;		/* protect map for range item */
+	atomic_long_t hot_cnt;
 	struct workqueue_struct *update_wq;
 	struct delayed_work update_work;
+	struct shrinker hot_shrink;
 };
 
 extern int hot_track_init(struct super_block *sb);

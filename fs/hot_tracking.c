@@ -29,6 +29,7 @@ static void hot_range_item_init(struct hot_range_item *hr,
 	hr->start = start;
 	hr->len = 1 << RANGE_BITS;
 	hr->hot_inode = he;
+	atomic_long_inc(&he->hot_root->hot_cnt);
 }
 
 static void hot_range_item_free_cb(struct rcu_head *head)
@@ -51,6 +52,7 @@ static void hot_range_item_free(struct kref *kref)
 		list_del_init(&hr->track_list);
 	spin_unlock(&root->m_lock);
 
+	atomic_long_dec(&root->hot_cnt);
 	call_rcu(&hr->rcu, hot_range_item_free_cb);
 }
 
@@ -98,6 +100,7 @@ redo:
 				 * the item for the range. Free the
 				 * newly allocated item.
 				 */
+				atomic_long_dec(&he->hot_root->hot_cnt);
 				kmem_cache_free(hot_range_item_cachep, hr_new);
 			}
 			spin_unlock(&he->i_lock);
@@ -199,6 +202,7 @@ static void hot_inode_item_init(struct hot_inode_item *he,
 	he->ino = ino;
 	he->hot_root = root;
 	spin_lock_init(&he->i_lock);
+	atomic_long_inc(&root->hot_cnt);
 }
 
 static void hot_inode_item_free_cb(struct rcu_head *head)
@@ -219,6 +223,7 @@ static void hot_inode_item_free(struct kref *kref)
 		list_del_init(&he->track_list);
 	hot_range_tree_free(he);
 
+	atomic_long_dec(&he->hot_root->hot_cnt);
 	call_rcu(&he->rcu, hot_inode_item_free_cb);
 }
 
@@ -264,6 +269,7 @@ redo:
 				 * the item for the inode. Free the
 				 * newly allocated item.
 				 */
+				atomic_long_dec(&root->hot_cnt);
 				kmem_cache_free(hot_inode_item_cachep, he_new);
 			}
 			spin_unlock(&root->t_lock);
@@ -485,6 +491,47 @@ u32 hot_temp_calc(struct hot_freq *freq)
 	return result;
 }
 
+static unsigned long hot_item_evict(struct hot_info *root, unsigned long work,
+			unsigned long (*work_get)(struct hot_info *root))
+{
+	long budget = work;
+	unsigned long freed = 0;
+	int i;
+
+	for (i = 0; i < MAP_SIZE; i++) {
+		struct hot_inode_item *he, *next;
+
+		spin_lock(&root->t_lock);
+		if (list_empty(&root->hot_map[TYPE_INODE][i])) {
+			spin_unlock(&root->t_lock);
+			continue;
+		}
+
+		list_for_each_entry_safe(he, next,
+			&root->hot_map[TYPE_INODE][i], track_list) {
+			long work_prev, delta;
+
+			if (atomic_read(&he->refs.refcount) > 1)
+				continue;
+			work_prev = work_get(root);
+			hot_inode_item_put(he);
+			delta = work_prev - work_get(root);
+			budget -= delta;
+			freed += delta;
+			if (unlikely(budget <= 0))
+				break;
+		}
+		spin_unlock(&root->t_lock);
+
+		if (unlikely(budget <= 0))
+			break;
+
+		cond_resched();
+	}
+
+	return freed;
+}
+
 /*
  * Every sync period we update temperatures for
  * each hot inode item and hot range item for aging
@@ -526,6 +573,41 @@ void __init hot_cache_init(void)
 			SLAB_RECLAIM_ACCOUNT | SLAB_MEM_SPREAD);
 	if (!hot_range_item_cachep)
 		kmem_cache_destroy(hot_inode_item_cachep);
+}
+
+static unsigned long hot_track_shrink_count(struct shrinker *shrink,
+			struct shrink_control *sc)
+{
+	struct hot_info *root =
+		container_of(shrink, struct hot_info, hot_shrink);
+
+	return (unsigned long)atomic_long_read(&root->hot_cnt);
+}
+
+static inline unsigned long hot_cnt_get(struct hot_info *root)
+{
+	return (unsigned long)atomic_long_read(&root->hot_cnt);
+}
+
+static unsigned long hot_prune_map(struct hot_info *root, unsigned long nr)
+{
+	return hot_item_evict(root, nr, hot_cnt_get);
+}
+
+/* The shrinker callback function */
+static unsigned long hot_track_shrink_scan(struct shrinker *shrink,
+			struct shrink_control *sc)
+{
+	struct hot_info *root =
+		container_of(shrink, struct hot_info, hot_shrink);
+	unsigned long freed;
+
+	if (!(sc->gfp_mask & __GFP_FS))
+		return SHRINK_STOP;
+
+	freed =  hot_prune_map(root, sc->nr_to_scan);
+
+	return freed;
 }
 
 /*
@@ -595,6 +677,7 @@ static struct hot_info *hot_tree_init(struct super_block *sb)
 	root->hot_inode_tree = RB_ROOT;
 	spin_lock_init(&root->t_lock);
 	spin_lock_init(&root->m_lock);
+	atomic_long_set(&root->hot_cnt, 0);
 
 	for (i = 0; i < MAP_SIZE; i++) {
 		for (j = 0; j < MAX_TYPES; j++)
@@ -615,6 +698,13 @@ static struct hot_info *hot_tree_init(struct super_block *sb)
 	queue_delayed_work(root->update_wq, &root->update_work,
 		msecs_to_jiffies(HOT_UPDATE_INTERVAL * MSEC_PER_SEC));
 
+	/* Register a shrinker callback */
+	root->hot_shrink.count_objects = hot_track_shrink_count;
+	root->hot_shrink.scan_objects = hot_track_shrink_scan;
+	root->hot_shrink.seeks = DEFAULT_SEEKS;
+	root->hot_shrink.flags = SHRINKER_NUMA_AWARE;
+	register_shrinker(&root->hot_shrink);
+
 	return root;
 }
 
@@ -626,6 +716,7 @@ static void hot_tree_exit(struct hot_info *root)
 	struct hot_inode_item *he;
 	struct rb_node *node;
 
+	unregister_shrinker(&root->hot_shrink);
 	cancel_delayed_work_sync(&root->update_work);
 	destroy_workqueue(root->update_wq);
 
