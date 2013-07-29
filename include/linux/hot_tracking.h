@@ -52,6 +52,7 @@ struct hot_inode_item {
 	struct kref refs;
 	struct rb_node rb_node;         /* rbtree index */
 	struct rcu_head rcu;
+	struct list_head track_list;    /* link to *_map[] */
 	struct rb_root hot_range_tree;	/* tree of ranges */
 	spinlock_t i_lock;		/* protect above tree */
 	struct hot_info *hot_root;	/* associated hot_info */
@@ -67,6 +68,7 @@ struct hot_range_item {
 	struct kref refs;
 	struct rb_node rb_node;                 /* rbtree index */
 	struct rcu_head rcu;
+	struct list_head track_list;            /* link to *_map[] */
 	struct hot_inode_item *hot_inode;	/* associated hot_inode_item */
 	loff_t start;				/* offset in bytes */
 	size_t len;				/* length in bytes */
@@ -74,7 +76,11 @@ struct hot_range_item {
 
 struct hot_info {
 	struct rb_root hot_inode_tree;
-	spinlock_t t_lock;				/* protect above tree */
+	struct list_head hot_map[MAX_TYPES][MAP_SIZE];	/* map of inode temp */
+	spinlock_t t_lock;		/* protect tree and map for inode item */
+	spinlock_t m_lock;		/* protect map for range item */
+	struct workqueue_struct *update_wq;
+	struct delayed_work update_work;
 };
 
 extern int hot_track_init(struct super_block *sb);
