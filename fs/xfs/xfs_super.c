@@ -62,6 +62,7 @@
 #include <linux/kthread.h>
 #include <linux/freezer.h>
 #include <linux/parser.h>
+#include <linux/hot_tracking.h>
 
 static const struct super_operations xfs_super_operations;
 static kmem_zone_t *xfs_ioend_zone;
@@ -115,6 +116,7 @@ mempool_t *xfs_ioend_pool;
 #define MNTOPT_NODELAYLOG  "nodelaylog"	/* Delayed logging disabled */
 #define MNTOPT_DISCARD	   "discard"	/* Discard unused blocks */
 #define MNTOPT_NODISCARD   "nodiscard"	/* Do not discard unused blocks */
+#define MNTOPT_HOTTRACK    "hot_track"  /* hot tracking */
 
 /*
  * Table driven mount option parser.
@@ -381,6 +383,8 @@ xfs_parseargs(
 			mp->m_flags |= XFS_MOUNT_DISCARD;
 		} else if (!strcmp(this_char, MNTOPT_NODISCARD)) {
 			mp->m_flags &= ~XFS_MOUNT_DISCARD;
+		} else if (!strcmp(this_char, MNTOPT_HOTTRACK)) {
+			mp->m_flags |= XFS_MOUNT_HOTTRACK;
 		} else if (!strcmp(this_char, "ihashsize")) {
 			xfs_warn(mp,
 	"ihashsize no longer used, option is deprecated.");
@@ -504,6 +508,7 @@ xfs_showargs(
 		{ XFS_MOUNT_GRPID,		"," MNTOPT_GRPID },
 		{ XFS_MOUNT_DISCARD,		"," MNTOPT_DISCARD },
 		{ XFS_MOUNT_SMALL_INUMS,	"," MNTOPT_32BITINODE },
+		{ XFS_MOUNT_HOTTRACK,		"," MNTOPT_HOTTRACK },
 		{ 0, NULL }
 	};
 	static struct proc_xfs_info xfs_info_unset[] = {
@@ -1046,6 +1051,9 @@ xfs_fs_put_super(
 {
 	struct xfs_mount	*mp = XFS_M(sb);
 
+	if (mp->m_flags & XFS_MOUNT_HOTTRACK)
+		hot_track_exit(sb);
+
 	xfs_filestream_unmount(mp);
 	xfs_unmountfs(mp);
 
@@ -1501,7 +1509,17 @@ xfs_fs_fill_super(
 		goto out_unmount;
 	}
 
+	if (mp->m_flags & XFS_MOUNT_HOTTRACK) {
+		error = hot_track_init(sb);
+		if (error)
+			goto out_free_root;
+	}
+
 	return 0;
+
+ out_free_root:
+	dput(sb->s_root);
+	sb->s_root = NULL;
 
  out_filestream_unmount:
 	xfs_filestream_unmount(mp);
