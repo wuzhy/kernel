@@ -3387,6 +3387,18 @@ L:	linux-fsdevel@vger.kernel.org
 S:	Maintained
 F:	fs/*
 
+VFS HOT TRACKING
+M:	Zhi Yong Wu <zwu.kernel@gmail.com>
+M:	Chandra Seetharaman <sekharan@us.ibm.com>
+L:	linux-fsdevel@vger.kernel.org
+T:	git git://github.com/wuzhy/kernel.git
+S:	Maintained
+F:	Documentation/filesystems/hot_tracking.txt
+F:	fs/hot_tracking.c
+F:	fs/hot_tracking.h
+F:	include/linux/hot_tracking.h
+F:	include/uapi/linux/hot_tracking.h
+
 FINTEK F75375S HARDWARE MONITOR AND FAN CONTROLLER DRIVER
 M:	Riku Voipio <riku.voipio@iki.fi>
 L:	lm-sensors@lm-sensors.org
