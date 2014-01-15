@@ -1295,6 +1295,14 @@ static int virtnet_change_mtu(struct net_device *dev, int new_mtu)
 	return 0;
 }
 
+#ifdef CONFIG_RFS_ACCEL
+static int virtnet_filter_rfs(struct net_device *net_dev,
+		const struct sk_buff *skb, u16 rxq_index, u32 flow_id)
+{
+	return 0;
+}
+#endif /* CONFIG_RFS_ACCEL */
+
 static const struct net_device_ops virtnet_netdev = {
 	.ndo_open            = virtnet_open,
 	.ndo_stop   	     = virtnet_close,
@@ -1308,6 +1316,9 @@ static const struct net_device_ops virtnet_netdev = {
 	.ndo_vlan_rx_kill_vid = virtnet_vlan_rx_kill_vid,
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	.ndo_poll_controller = virtnet_netpoll,
+#endif
+#ifdef CONFIG_RFS_ACCEL
+	.ndo_rx_flow_steer   = virtnet_filter_rfs,
 #endif
 };
 
