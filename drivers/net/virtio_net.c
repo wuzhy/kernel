@@ -26,6 +26,7 @@
 #include <linux/if_vlan.h>
 #include <linux/slab.h>
 #include <linux/cpu.h>
+#include <linux/cpu_rmap.h>
 
 static int napi_weight = NAPI_POLL_WEIGHT;
 module_param(napi_weight, int, 0444);
@@ -1554,6 +1555,49 @@ err:
 	return ret;
 }
 
+static void virtnet_free_irq_cpu_rmap(struct virtnet_info *vi)
+{
+#ifdef CONFIG_RFS_ACCEL
+	free_irq_cpu_rmap(vi->dev->rx_cpu_rmap);
+	vi->dev->rx_cpu_rmap = NULL;
+#endif
+}
+
+static int virtnet_init_rx_cpu_rmap(struct virtnet_info *vi)
+{
+	int rc = 0;
+
+#ifdef CONFIG_RFS_ACCEL
+	struct virtio_device *vdev = vi->vdev;
+	unsigned int irq;
+	int i;
+
+	if (!vi->affinity_hint_set)
+		goto out;
+
+	vi->dev->rx_cpu_rmap = alloc_irq_cpu_rmap(vi->max_queue_pairs);
+	if (!vi->dev->rx_cpu_rmap) {
+		rc = -ENOMEM;
+		goto out;
+	}
+
+	for (i = 0; i < vi->max_queue_pairs; i++) {
+		irq = virtqueue_get_vq_irq(vdev, vi->rq[i].vq);
+		if (irq == -1)
+			goto failed;
+
+		rc = irq_cpu_rmap_add(vi->dev->rx_cpu_rmap, irq);
+		if (rc) {
+failed:
+			virtnet_free_irq_cpu_rmap(vi);
+			goto out;
+		}
+	}
+out:
+#endif
+	return rc;
+}
+
 static int virtnet_probe(struct virtio_device *vdev)
 {
 	int i, err;
@@ -1671,10 +1715,16 @@ static int virtnet_probe(struct virtio_device *vdev)
 	netif_set_real_num_tx_queues(dev, vi->curr_queue_pairs);
 	netif_set_real_num_rx_queues(dev, vi->curr_queue_pairs);
 
+	err = virtnet_init_rx_cpu_rmap(vi);
+	if (err) {
+		pr_debug("virtio_net: initializing rx cpu rmap failed\n");
+		goto free_vqs;
+	}
+
 	err = register_netdev(dev);
 	if (err) {
 		pr_debug("virtio_net: registering device failed\n");
-		goto free_vqs;
+		goto free_cpu_rmap;
 	}
 
 	/* Last of all, set up some receive buffers. */
@@ -1714,6 +1764,8 @@ static int virtnet_probe(struct virtio_device *vdev)
 free_recv_bufs:
 	free_receive_bufs(vi);
 	unregister_netdev(dev);
+free_cpu_rmap:
+	virtnet_free_irq_cpu_rmap(vi);
 free_vqs:
 	cancel_delayed_work_sync(&vi->refill);
 	virtnet_del_vqs(vi);
@@ -1750,6 +1802,8 @@ static void virtnet_remove(struct virtio_device *vdev)
 	mutex_unlock(&vi->config_lock);
 
 	unregister_netdev(vi->dev);
+
+	virtnet_free_irq_cpu_rmap(vi);
 
 	remove_vq_common(vi);
 	if (vi->alloc_frag.page)
