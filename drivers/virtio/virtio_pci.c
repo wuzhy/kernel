@@ -654,6 +654,16 @@ static int vp_set_vq_affinity(struct virtqueue *vq, int cpu)
 	return 0;
 }
 
+static int vp_get_vq_irq(struct virtio_device *vdev, struct virtqueue *vq)
+{
+	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
+	struct virtio_pci_vq_info *info = vq->priv;
+
+	if (vp_dev->msix_enabled)
+		return vp_dev->msix_entries[info->msix_vector].vector;
+	return -1;
+}
+
 static const struct virtio_config_ops virtio_pci_config_ops = {
 	.get		= vp_get,
 	.set		= vp_set,
@@ -666,6 +676,7 @@ static const struct virtio_config_ops virtio_pci_config_ops = {
 	.finalize_features = vp_finalize_features,
 	.bus_name	= vp_bus_name,
 	.set_vq_affinity = vp_set_vq_affinity,
+	.get_vq_irq	= vp_get_vq_irq,
 };
 
 static void virtio_pci_release_dev(struct device *_d)
